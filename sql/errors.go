@@ -154,6 +154,18 @@ var (
 	// ErrUnknownSystemVariable is returned when a query references a system variable that doesn't exist
 	ErrUnknownSystemVariable = errors.NewKind(`Unknown system variable '%s'`)
 
+	// ErrSystemVariableReadOnly is returned when attempting to set a value to a non-Dynamic system variable.
+	ErrSystemVariableReadOnly = errors.NewKind(`Variable '%s' is a read only variable`)
+
+	// ErrSystemVariableGlobalNotSession is returned when attempting to set a SESSION-only variable using SET GLOBAL.
+	ErrSystemVariableGlobalNotSession = errors.NewKind(`Variable '%s' is a SESSION variable and can't be used with SET GLOBAL`)
+
+	// ErrSystemVariableSessionNotGlobal is returned when attempting to set a GLOBAL-only variable using SET SESSION.
+	ErrSystemVariableSessionNotGlobal = errors.NewKind(`Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL`)
+
+	// ErrUserVariableNoDefault is returned when attempting to set the default value on a user variable.
+	ErrUserVariableNoDefault = errors.NewKind(`User variable '%s' does not have a default value`)
+
 	// ErrInvalidUseOfOldNew is returned when a trigger attempts to make use of OLD or NEW references when they don't exist
 	ErrInvalidUseOfOldNew = errors.NewKind("There is no %s row in on %s trigger")
 
