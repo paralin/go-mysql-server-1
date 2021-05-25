@@ -15,22 +15,22 @@
 package server
 
 import (
-	"crypto/tls"
 	"time"
 
-	"github.com/dolthub/vitess/go/mysql"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
 
 	gms "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/vitess/go/mysql"
 )
 
 // Server is a MySQL server for SQLe engines.
 type Server struct {
-	Listener   *mysql.Listener
-	handler    mysql.Handler
-	sessionMgr *SessionManager
-	Engine     *gms.Engine
+	Engine  *gms.Engine
+	handler mysql.Handler
+	sessMgr *SessionManager
+	le      *logrus.Entry
 }
 
 // Config for the mysql server.
@@ -50,10 +50,6 @@ type Config struct {
 	ConnWriteTimeout time.Duration
 	// MaxConnections is the maximum number of simultaneous connections that the server will allow.
 	MaxConnections uint64
-	// TLSConfig is the configuration for TLS on this server. If |nil|, TLS is not supported.
-	TLSConfig *tls.Config
-	// RequestSecureTransport will require incoming connections to be TLS. Requires non-|nil| TLSConfig.
-	RequireSecureTransport bool
 	// DisableClientMultiStatements will prevent processing of incoming
 	// queries as if they contain more than one query. This processing
 	// currently works in some simple cases, but breaks in the presence of
@@ -64,9 +60,8 @@ type Config struct {
 	DisableClientMultiStatements bool
 	// NoDefaults prevents using persisted configuration for new server sessions
 	NoDefaults bool
-	// Socket is a path to unix socket file
-	Socket                   string
-	AllowClearTextWithoutTLS bool
+	// Logger is the logger to use, otherwise uses stderr.
+	Logger *logrus.Entry
 	// MaxLoggedQueryLen sets the length at which queries written to the logs are truncated.  A value of 0 will
 	// result in no truncation. A value less than 0 will result in the queries being omitted from the logs completely
 	MaxLoggedQueryLen int
