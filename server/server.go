@@ -15,13 +15,10 @@
 package server
 
 import (
-	"errors"
-	"fmt"
 	"net"
 	"time"
 
 	"github.com/dolthub/vitess/go/mysql"
-	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
 
 	sqle "github.com/dolthub/go-mysql-server"
@@ -34,17 +31,6 @@ type ProtocolListener interface {
 	Addr() net.Addr
 	Accept()
 	Close()
-}
-
-// ProtocolListenerFunc returns a ProtocolListener based on the configuration it was given.
-type ProtocolListenerFunc func(cfg mysql.ListenerConfig) (ProtocolListener, error)
-
-// DefaultProtocolListenerFunc is the protocol listener, which defaults to Vitess' protocol listener. Changing
-// this function will change the protocol listener used when creating all servers. If multiple servers are needed
-// with different protocols, then create each server after changing this function. Servers retain the protocol that
-// they were created with.
-var DefaultProtocolListenerFunc ProtocolListenerFunc = func(cfg mysql.ListenerConfig) (ProtocolListener, error) {
-	return mysql.NewListenerWithConfig(cfg)
 }
 
 type ServerEventListener interface {
@@ -141,79 +127,11 @@ func newServerFromHandler(cfg Config, e *sqle.Engine, sm *SessionManager, handle
 		cfg.MaxConnections = 0
 	}
 
-	l := cfg.Listener
-	var unixSocketInUse error
-	if l == nil {
-		if portInUse(cfg.Address) {
-			unixSocketInUse = fmt.Errorf("Port %s already in use.", cfg.Address)
-		}
-
-		var err error
-		l, err = NewListener(cfg.Protocol, cfg.Address, cfg.Socket)
-		if err != nil {
-			if errors.Is(err, UnixSocketInUseError) {
-				unixSocketInUse = err
-			} else {
-				return nil, err
-			}
-		}
-	}
-
-	listenerCfg := mysql.ListenerConfig{
-		Listener:                 l,
-		AuthServer:               e.Analyzer.Catalog.MySQLDb,
-		Handler:                  handler,
-		ConnReadTimeout:          cfg.ConnReadTimeout,
-		ConnWriteTimeout:         cfg.ConnWriteTimeout,
-		MaxConns:                 cfg.MaxConnections,
-		ConnReadBufferSize:       mysql.DefaultConnBufferSize,
-		AllowClearTextWithoutTLS: cfg.AllowClearTextWithoutTLS,
-	}
-	protocolListener, err := DefaultProtocolListenerFunc(listenerCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	if vtListener, ok := protocolListener.(*mysql.Listener); ok {
-		if cfg.Version != "" {
-			vtListener.ServerVersion = cfg.Version
-		}
-		vtListener.TLSConfig = cfg.TLSConfig
-		vtListener.RequireSecureTransport = cfg.RequireSecureTransport
-	}
-
 	return &Server{
-		Listener:   protocolListener,
 		handler:    handler,
 		sessionMgr: sm,
 		Engine:     e,
-	}, unixSocketInUse
-}
-
-// Start starts accepting connections on the server.
-func (s *Server) Start() error {
-	logrus.Infof("Server ready. Accepting connections.")
-	s.WarnIfLoadFileInsecure()
-	s.Listener.Accept()
-	return nil
-}
-
-func (s *Server) WarnIfLoadFileInsecure() {
-	_, v, ok := sql.SystemVariables.GetGlobal("secure_file_priv")
-	if ok {
-		if v == "" {
-			logrus.Warn("secure_file_priv is set to \"\", which is insecure.")
-			logrus.Warn("Any user with GRANT FILE privileges will be able to read any file which the sql-server process can read.")
-			logrus.Warn("Please consider restarting the server with secure_file_priv set to a safe (or non-existent) directory.")
-		}
-	}
-}
-
-// Close closes the server connection.
-func (s *Server) Close() error {
-	logrus.Infof("Server closing listener. No longer accepting connections.")
-	s.Listener.Close()
-	return nil
+	}, nil
 }
 
 // SessionManager returns the session manager for this server.

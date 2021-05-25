@@ -22,23 +22,11 @@ import (
 	querypb "github.com/dolthub/vitess/go/vt/proto/query"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 	ast "github.com/dolthub/vitess/go/vt/sqlparser"
-
-	sqle "github.com/dolthub/go-mysql-server"
 )
 
 func Intercept(h Interceptor) {
 	inters = append(inters, h)
 	sort.Slice(inters, func(i, j int) bool { return inters[i].Priority() < inters[j].Priority() })
-}
-
-func WithChain() Option {
-	return func(e *sqle.Engine, sm *SessionManager, handler mysql.Handler) {
-		f := DefaultProtocolListenerFunc
-		DefaultProtocolListenerFunc = func(cfg mysql.ListenerConfig) (ProtocolListener, error) {
-			cfg.Handler = buildChain(cfg.Handler)
-			return f(cfg)
-		}
-	}
 }
 
 var inters []Interceptor
