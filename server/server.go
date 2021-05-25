@@ -15,16 +15,12 @@
 package server
 
 import (
-	"errors"
 	"time"
-
-	"github.com/dolthub/vitess/go/mysql"
-	"github.com/sirupsen/logrus"
-	"go.opentelemetry.io/otel/trace"
 
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/server/golden"
 	"github.com/dolthub/go-mysql-server/sql"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ServerEventListener interface {
@@ -48,10 +44,37 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder, listener ServerEve
 	} else {
 		tracer = sql.NoopTracer
 	}
+	if cfg.ConnReadTimeout < 0 {
+		cfg.ConnReadTimeout = 0
+	}
+	if cfg.ConnWriteTimeout < 0 {
+		cfg.ConnWriteTimeout = 0
+	}
+	if cfg.MaxConnections < 0 {
+		cfg.MaxConnections = 0
+	}
 
-	sm := NewSessionManager(sb, tracer, e.Analyzer.Catalog.HasDB, e.MemoryManager, e.ProcessList, cfg.Address)
-	handler := NewHandler(e, sm, cfg.ConnReadTimeout, cfg.DisableClientMultiStatements, cfg.MaxLoggedQueryLen, listener)
-	return newServerFromHandler(cfg, e, sm, handler)
+	le := buildDefaultLogger(cfg.Logger)
+
+	sessMgr := NewSessionManager(
+		sb,
+		tracer,
+		e.Analyzer.Catalog.HasDB,
+		e.MemoryManager,
+		e.ProcessList,
+		cfg.Address,
+	)
+	handler := NewHandler(
+		le,
+		e,
+		sessMgr,
+		cfg.ConnReadTimeout,
+		cfg.DisableClientMultiStatements,
+		cfg.MaxLoggedQueryLen,
+		listener,
+	)
+
+	return &Server{handler: handler, Engine: e, sessMgr: sessMgr, le: le}, nil
 }
 
 // NewValidatingServer creates a Server that validates its query results using a MySQL connection
@@ -63,86 +86,21 @@ func NewValidatingServer(
 	listener ServerEventListener,
 	mySqlConn string,
 ) (*Server, error) {
-	var tracer trace.Tracer
-	if cfg.Tracer != nil {
-		tracer = cfg.Tracer
-	} else {
-		tracer = sql.NoopTracer
-	}
-
-	sm := NewSessionManager(sb, tracer, e.Analyzer.Catalog.HasDB, e.MemoryManager, e.ProcessList, cfg.Address)
-	h := NewHandler(e, sm, cfg.ConnReadTimeout, cfg.DisableClientMultiStatements, cfg.MaxLoggedQueryLen, listener)
-
-	handler, err := golden.NewValidatingHandler(h, mySqlConn, logrus.StandardLogger())
-	if err != nil {
-		return nil, err
-	}
-	return newServerFromHandler(cfg, e, sm, handler)
-}
-
-func newServerFromHandler(cfg Config, e *sqle.Engine, sm *SessionManager, handler mysql.Handler) (*Server, error) {
-	if cfg.ConnReadTimeout < 0 {
-		cfg.ConnReadTimeout = 0
-	}
-	if cfg.ConnWriteTimeout < 0 {
-		cfg.ConnWriteTimeout = 0
-	}
-	if cfg.MaxConnections < 0 {
-		cfg.MaxConnections = 0
-	}
-
-	var unixSocketInUse error
-	l, err := NewListener(cfg.Protocol, cfg.Address, cfg.Socket)
-	if err != nil {
-		if errors.Is(err, UnixSocketInUseError) {
-			unixSocketInUse = err
-		} else {
-			return nil, err
-		}
-	}
-
-	listenerCfg := mysql.ListenerConfig{
-		Listener:                 l,
-		AuthServer:               e.Analyzer.Catalog.MySQLDb,
-		Handler:                  handler,
-		ConnReadTimeout:          cfg.ConnReadTimeout,
-		ConnWriteTimeout:         cfg.ConnWriteTimeout,
-		MaxConns:                 cfg.MaxConnections,
-		ConnReadBufferSize:       mysql.DefaultConnBufferSize,
-		AllowClearTextWithoutTLS: cfg.AllowClearTextWithoutTLS,
-	}
-	vtListnr, err := mysql.NewListenerWithConfig(listenerCfg)
+	server, err := NewServer(cfg, e, sb, listener)
 	if err != nil {
 		return nil, err
 	}
 
-	if cfg.Version != "" {
-		vtListnr.ServerVersion = cfg.Version
+	handler, err := golden.NewValidatingHandler(server.handler, mySqlConn, server.le)
+	if err != nil {
+		return nil, err
 	}
-	vtListnr.TLSConfig = cfg.TLSConfig
-	vtListnr.RequireSecureTransport = cfg.RequireSecureTransport
+	server.handler = handler
 
-	return &Server{
-		Listener:   vtListnr,
-		handler:    handler,
-		sessionMgr: sm,
-		Engine:     e,
-	}, unixSocketInUse
-}
-
-// Start starts accepting connections on the server.
-func (s *Server) Start() error {
-	s.Listener.Accept()
-	return nil
-}
-
-// Close closes the server connection.
-func (s *Server) Close() error {
-	s.Listener.Close()
-	return nil
+	return server, nil
 }
 
 // SessionManager returns the session manager for this server.
 func (s *Server) SessionManager() *SessionManager {
-	return s.sessionMgr
+	return s.sessMgr
 }

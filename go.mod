@@ -1,12 +1,15 @@
 module github.com/dolthub/go-mysql-server
 
+go 1.19
+
+replace github.com/dolthub/vitess => github.com/paralin/vitess v0.0.0-20230303010909-96180325b868 // ext-engines
+
 require (
-	github.com/cespare/xxhash v1.1.0
-	github.com/dolthub/sqllogictest/go v0.0.0-20201107003712-816f3ae12d81
-	github.com/dolthub/vitess v0.0.0-20230301224006-436948ebe944
-	github.com/go-kit/kit v0.10.0
+	github.com/cespare/xxhash/v2 v2.2.0
+	github.com/dolthub/vitess v0.0.0-20210823180838-e36a9ec06b90
+	github.com/go-kit/kit v0.12.0
 	github.com/go-sql-driver/mysql v1.6.0
-	github.com/gocraft/dbr/v2 v2.7.2
+	github.com/gocraft/dbr/v2 v2.7.3
 	github.com/google/flatbuffers v2.0.6+incompatible
 	github.com/google/uuid v1.2.0
 	github.com/hashicorp/golang-lru v0.5.4
@@ -33,13 +36,11 @@ require (
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
 	golang.org/x/mod v0.7.0 // indirect
 	golang.org/x/sys v0.2.0 // indirect
-	google.golang.org/genproto v0.0.0-20210506142907-4a47615972c2 // indirect
-	google.golang.org/grpc v1.37.0 // indirect
+	google.golang.org/genproto v0.0.0-20210917145530-b395a37504d4 // indirect
+	google.golang.org/grpc v1.40.0 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/check.v1 v1.0.0-20200902074654-038fdea0a05b // indirect
 	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776 // indirect
 )
 
 replace github.com/oliveagle/jsonpath => github.com/dolthub/jsonpath v0.0.0-20210609232853-d49537a30474
-
-go 1.19
