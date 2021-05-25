@@ -17,7 +17,6 @@ package server
 import (
 	"time"
 
-	"github.com/dolthub/vitess/go/mysql"
 	"github.com/opentracing/opentracing-go"
 
 	sqle "github.com/dolthub/go-mysql-server"
@@ -45,19 +44,11 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder, listener ServerEve
 		tracer = opentracing.NoopTracer{}
 	}
 
-	if cfg.ConnReadTimeout < 0 {
-		cfg.ConnReadTimeout = 0
-	}
+	le := buildDefaultLogger(cfg.Logger)
 
-	if cfg.ConnWriteTimeout < 0 {
-		cfg.ConnWriteTimeout = 0
-	}
-
-	if cfg.MaxConnections < 0 {
-		cfg.MaxConnections = 0
-	}
-
-	handler := NewHandler(e,
+	handler := NewHandler(
+		le,
+		e,
 		NewSessionManager(
 			sb,
 			tracer,
@@ -69,44 +60,8 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder, listener ServerEve
 		cfg.DisableClientMultiStatements,
 		listener,
 	)
-	l, err := NewListener(cfg.Protocol, cfg.Address, handler)
-	if err != nil {
-		return nil, err
-	}
 
-	listenerCfg := mysql.ListenerConfig{
-		Listener:           l,
-		AuthServer:         e.Analyzer.Catalog.MySQLDb,
-		Handler:            handler,
-		ConnReadTimeout:    cfg.ConnReadTimeout,
-		ConnWriteTimeout:   cfg.ConnWriteTimeout,
-		MaxConns:           cfg.MaxConnections,
-		ConnReadBufferSize: mysql.DefaultConnBufferSize,
-	}
-	vtListnr, err := mysql.NewListenerWithConfig(listenerCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	if cfg.Version != "" {
-		vtListnr.ServerVersion = cfg.Version
-	}
-	vtListnr.TLSConfig = cfg.TLSConfig
-	vtListnr.RequireSecureTransport = cfg.RequireSecureTransport
-
-	return &Server{Listener: vtListnr, h: handler}, nil
-}
-
-// Start starts accepting connections on the server.
-func (s *Server) Start() error {
-	s.Listener.Accept()
-	return nil
-}
-
-// Close closes the server connection.
-func (s *Server) Close() error {
-	s.Listener.Close()
-	return nil
+	return &Server{h: handler}, nil
 }
 
 // SessionManager returns the session manager for this server.

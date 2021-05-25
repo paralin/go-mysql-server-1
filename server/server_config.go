@@ -18,16 +18,15 @@ import (
 	"crypto/tls"
 	"time"
 
-	"github.com/dolthub/vitess/go/mysql"
 	"github.com/opentracing/opentracing-go"
+	"github.com/sirupsen/logrus"
 
 	"github.com/dolthub/go-mysql-server/sql"
 )
 
 // Server is a MySQL server for SQLe engines.
 type Server struct {
-	Listener *mysql.Listener
-	h        *Handler
+	h *Handler
 }
 
 // Config for the mysql server.
@@ -61,6 +60,8 @@ type Config struct {
 	DisableClientMultiStatements bool
 	// NoDefaults prevents using persisted configuration for new server sessions
 	NoDefaults bool
+	// Logger is the logger to use, otherwise uses stderr.
+	Logger *logrus.Entry
 }
 
 func (c Config) NewConfig() (Config, error) {
