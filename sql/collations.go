@@ -19,7 +19,7 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/cespare/xxhash"
+	"github.com/cespare/xxhash/v2"
 
 	"github.com/dolthub/go-mysql-server/sql/encodings"
 )
