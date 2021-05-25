@@ -35,12 +35,12 @@ import (
 type Validator struct {
 	handler mysql.Handler
 	golden  MySqlProxy
-	logger  *logrus.Logger
+	logger  *logrus.Entry
 }
 
 // NewValidatingHandler creates a new Validator wrapping a MySQL connection.
-func NewValidatingHandler(handler mysql.Handler, mySqlConn string, logger *logrus.Logger) (Validator, error) {
-	golden, err := NewMySqlProxyHandler(logger, mySqlConn)
+func NewValidatingHandler(handler mysql.Handler, mySqlConn string, le *logrus.Entry) (Validator, error) {
+	golden, err := NewMySqlProxyHandler(le, mySqlConn)
 	if err != nil {
 		return Validator{}, err
 	}
@@ -53,7 +53,7 @@ func NewValidatingHandler(handler mysql.Handler, mySqlConn string, logger *logru
 	return Validator{
 		handler: handler,
 		golden:  golden,
-		logger:  logger,
+		logger:  le,
 	}, nil
 }
 
@@ -157,8 +157,9 @@ func (v Validator) ParserOptionsForConnection(_ *mysql.Conn) (sqlparser.ParserOp
 }
 
 func (v Validator) getLogger(c *mysql.Conn) *logrus.Entry {
-	return logrus.NewEntry(v.logger).WithField(
-		sql.ConnectionIdLogField, c.ConnectionID)
+	return v.logger.WithField(
+		sql.ConnectionIdLogField, c.ConnectionID,
+	)
 }
 
 type aggregator struct {

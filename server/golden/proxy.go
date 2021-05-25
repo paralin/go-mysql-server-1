@@ -39,7 +39,7 @@ import (
 type MySqlProxy struct {
 	ctx     *sql.Context
 	connStr string
-	logger  *logrus.Logger
+	logger  *logrus.Entry
 	conns   map[uint32]proxyConn
 }
 
@@ -53,7 +53,7 @@ type proxyConn struct {
 }
 
 // NewMySqlProxyHandler creates a new MySqlProxy.
-func NewMySqlProxyHandler(logger *logrus.Logger, connStr string) (MySqlProxy, error) {
+func NewMySqlProxyHandler(le *logrus.Entry, connStr string) (MySqlProxy, error) {
 	// ensure parseTime=true
 	cfg, err := mysql2.ParseDSN(connStr)
 	if err != nil {
@@ -62,7 +62,7 @@ func NewMySqlProxyHandler(logger *logrus.Logger, connStr string) (MySqlProxy, er
 	cfg.ParseTime = true
 	connStr = cfg.FormatDSN()
 
-	conn, err := newConn(connStr, 0, logger)
+	conn, err := newConn(connStr, 0, le)
 	if err != nil {
 		return MySqlProxy{}, err
 	}
@@ -75,15 +75,15 @@ func NewMySqlProxyHandler(logger *logrus.Logger, connStr string) (MySqlProxy, er
 	return MySqlProxy{
 		ctx:     sql.NewEmptyContext(),
 		connStr: connStr,
-		logger:  logger,
+		logger:  le,
 		conns:   make(map[uint32]proxyConn),
 	}, nil
 }
 
 var _ mysql.Handler = MySqlProxy{}
 
-func newConn(connStr string, connId uint32, lgr *logrus.Logger) (conn proxyConn, err error) {
-	l := logrus.NewEntry(lgr).WithField("dsn", connStr).WithField(sql.ConnectionIdLogField, connId)
+func newConn(connStr string, connId uint32, lgr *logrus.Entry) (conn proxyConn, err error) {
+	l := lgr.WithField("dsn", connStr).WithField(sql.ConnectionIdLogField, connId)
 	var c *dbr.Connection
 	for d := 100.0; d < 10000.0; d *= 1.6 {
 		l.Debugf("Attempting connection to MySQL")

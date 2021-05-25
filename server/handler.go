@@ -17,13 +17,11 @@ package server
 import (
 	"encoding/base64"
 	"io"
-	"net"
 	"regexp"
 	"sync"
 	"time"
 
 	"github.com/dolthub/vitess/go/mysql"
-	"github.com/dolthub/vitess/go/netutil"
 	"github.com/dolthub/vitess/go/sqltypes"
 	"github.com/dolthub/vitess/go/vt/log"
 	"github.com/dolthub/vitess/go/vt/proto/query"
@@ -35,7 +33,6 @@ import (
 	"gopkg.in/src-d/go-errors.v1"
 
 	sqle "github.com/dolthub/go-mysql-server"
-	"github.com/dolthub/go-mysql-server/internal/sockstate"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/plan"
@@ -73,6 +70,8 @@ func init() {
 
 // Handler is a connection handler for a SQLe engine, implementing the Vitess mysql.Handler interface.
 type Handler struct {
+	le *logrus.Entry
+	// mu                sync.Mutex
 	e                 *sqle.Engine
 	sm                *SessionManager
 	readTimeout       time.Duration
@@ -84,6 +83,29 @@ type Handler struct {
 
 var _ mysql.Handler = (*Handler)(nil)
 
+// NewHandler creates a new Handler given a SQLe engine.
+func NewHandler(
+	le *logrus.Entry,
+	e *sqle.Engine,
+	sm *SessionManager,
+	rt time.Duration,
+	disableMultiStmts bool,
+	maxLoggedQueryLen int,
+	encodeLoggedQuery bool,
+	listener ServerEventListener,
+) *Handler {
+	return &Handler{
+		le:                le,
+		e:                 e,
+		sm:                sm,
+		readTimeout:       rt,
+		disableMultiStmts: disableMultiStmts,
+		maxLoggedQueryLen: maxLoggedQueryLen,
+		encodeLoggedQuery: encodeLoggedQuery,
+		sel:               listener,
+	}
+}
+
 // NewConnection reports that a new connection has been established.
 func (h *Handler) NewConnection(c *mysql.Conn) {
 	if h.sel != nil {
@@ -93,7 +115,7 @@ func (h *Handler) NewConnection(c *mysql.Conn) {
 	h.sm.AddConn(c)
 
 	c.DisableClientMultiStatements = h.disableMultiStmts
-	logrus.WithField(sql.ConnectionIdLogField, c.ConnectionID).WithField("DisableClientMultiStatements", c.DisableClientMultiStatements).Infof("NewConnection")
+	h.le.WithField(sql.ConnectionIdLogField, c.ConnectionID).WithField("DisableClientMultiStatements", c.DisableClientMultiStatements).Infof("NewConnection")
 }
 
 func (h *Handler) ComInitDB(c *mysql.Conn, schemaName string) error {
@@ -167,7 +189,6 @@ func (h *Handler) ConnectionClosed(c *mysql.Conn) {
 
 	if ctx, err := h.sm.NewContextWithQuery(c, ""); err != nil {
 		logrus.Errorf("unable to release all locks on session close: %s", err)
-		logrus.Errorf("unable to unlock tables on session close: %s", err)
 	} else {
 		_, err = h.e.LS.ReleaseAll(ctx)
 		if err != nil {
@@ -178,7 +199,7 @@ func (h *Handler) ConnectionClosed(c *mysql.Conn) {
 		}
 	}
 
-	logrus.WithField(sql.ConnectionIdLogField, c.ConnectionID).Infof("ConnectionClosed")
+	h.le.WithField(sql.ConnectionIdLogField, c.ConnectionID).Infof("ConnectionClosed")
 }
 
 func (h *Handler) ComMultiQuery(
@@ -298,11 +319,6 @@ func (h *Handler) doQuery(
 
 	})
 
-	pollCtx, cancelF := ctx.NewSubContext()
-	eg.Go(func() error {
-		return h.pollForClosedConnection(pollCtx, c)
-	})
-
 	// Default waitTime is one minute if there is no timeout configured, in which case
 	// it will loop to iterate again unless the socket died by the OS timeout or other problems.
 	// If there is a timeout, it will be enforced to ensure that Vitess has a chance to
@@ -311,6 +327,7 @@ func (h *Handler) doQuery(
 	if h.readTimeout > 0 {
 		waitTime = h.readTimeout
 	}
+
 	timer := time.NewTimer(waitTime)
 	defer timer.Stop()
 
@@ -320,7 +337,6 @@ func (h *Handler) doQuery(
 	// reads rows from the channel, converts them to wire format,
 	// and calls |callback| to give them to vitess.
 	eg.Go(func() error {
-		defer cancelF()
 		defer wg.Done()
 		for {
 			if r == nil {
@@ -467,70 +483,6 @@ func (h *Handler) errorWrappedDoQuery(
 	}
 
 	return remainder, err
-}
-
-// Periodically polls the connection socket to determine if it is has been closed by the client, returning an error
-// if it has been. Meant to be run in an errgroup from the query handler routine. Returns immediately with no error
-// on platforms that can't support TCP socket checks.
-func (h *Handler) pollForClosedConnection(ctx *sql.Context, c *mysql.Conn) error {
-	tcpConn, ok := maybeGetTCPConn(c.Conn)
-	if !ok {
-		ctx.GetLogger().Trace("Connection checker exiting, connection isn't TCP")
-		return nil
-	}
-
-	inode, err := sockstate.GetConnInode(tcpConn)
-	if err != nil || inode == 0 {
-		if !sockstate.ErrSocketCheckNotImplemented.Is(err) {
-			ctx.GetLogger().Trace("Connection checker exiting, connection isn't TCP")
-		}
-		return nil
-	}
-
-	t, ok := tcpConn.LocalAddr().(*net.TCPAddr)
-	if !ok {
-		ctx.GetLogger().Trace("Connection checker exiting, could not get local port")
-		return nil
-	}
-
-	timer := time.NewTimer(tcpCheckerSleepDuration)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-timer.C:
-		}
-
-		st, err := sockstate.GetInodeSockState(t.Port, inode)
-		switch st {
-		case sockstate.Broken:
-			ctx.GetLogger().Warn("socket state is broken, returning error")
-			return ErrConnectionWasClosed.New()
-		case sockstate.Error:
-			ctx.GetLogger().WithError(err).Warn("Connection checker exiting, got err checking sockstate")
-			return nil
-		default: // Established
-			// (juanjux) this check is not free, each iteration takes about 9 milliseconds to run on my machine
-			// thus the small wait between checks
-			timer.Reset(tcpCheckerSleepDuration)
-		}
-	}
-}
-
-func maybeGetTCPConn(conn net.Conn) (*net.TCPConn, bool) {
-	wrap, ok := conn.(netutil.ConnWithTimeouts)
-	if ok {
-		conn = wrap.Conn
-	}
-
-	tcp, ok := conn.(*net.TCPConn)
-	if ok {
-		return tcp, true
-	}
-
-	return nil, false
 }
 
 func resultFromOkResult(result types.OkResult) *sqltypes.Result {
