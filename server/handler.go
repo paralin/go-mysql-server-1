@@ -59,18 +59,16 @@ const tcpCheckerSleepTime = 1
 
 // Handler is a connection handler for a SQLe engine.
 type Handler struct {
-	mu          sync.Mutex
-	e           *sqle.Engine
-	sm          *SessionManager
-	readTimeout time.Duration
+	mu sync.Mutex
+	e  *sqle.Engine
+	sm *SessionManager
 }
 
 // NewHandler creates a new Handler given a SQLe engine.
-func NewHandler(e *sqle.Engine, sm *SessionManager, rt time.Duration) *Handler {
+func NewHandler(e *sqle.Engine, sm *SessionManager) *Handler {
 	return &Handler{
-		e:           e,
-		sm:          sm,
-		readTimeout: rt,
+		e:  e,
+		sm: sm,
 	}
 }
 
@@ -326,9 +324,6 @@ func (h *Handler) doQuery(
 	// call Handler.CloseConnection()
 	waitTime := 1 * time.Minute
 
-	if h.readTimeout > 0 {
-		waitTime = h.readTimeout
-	}
 	timer := time.NewTimer(waitTime)
 	defer timer.Stop()
 
@@ -396,12 +391,9 @@ rowLoop:
 			r.Rows = append(r.Rows, outputRow)
 			r.RowsAffected++
 		case <-timer.C:
-			if h.readTimeout != 0 {
-				// Cancel and return so Vitess can call the CloseConnection callback
-				logrus.Tracef("connection %d got timeout", c.ConnectionID)
-				close(quit)
-				return ErrRowTimeout.New()
-			}
+			// Cancel and return so Vitess can call the CloseConnection callback
+			close(quit)
+			return ErrRowTimeout.New()
 		}
 		timer.Reset(waitTime)
 	}
