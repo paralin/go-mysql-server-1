@@ -18,7 +18,7 @@ import (
 	"crypto/tls"
 	"time"
 
-	"github.com/dolthub/vitess/go/mysql"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -26,8 +26,7 @@ import (
 
 // Server is a MySQL server for SQLe engines.
 type Server struct {
-	Listener *mysql.Listener
-	h        *Handler
+	h *Handler
 }
 
 // Config for the mysql server.
@@ -61,9 +60,8 @@ type Config struct {
 	DisableClientMultiStatements bool
 	// NoDefaults prevents using persisted configuration for new server sessions
 	NoDefaults bool
-	// Socket is a path to unix socket file
-	Socket                   string
-	AllowClearTextWithoutTLS bool
+	// Logger is the logger to use, otherwise uses stderr.
+	Logger *logrus.Entry
 }
 
 func (c Config) NewConfig() (Config, error) {
