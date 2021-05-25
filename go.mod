@@ -1,12 +1,13 @@
 module github.com/dolthub/go-mysql-server
 
+go 1.18
+
+replace github.com/dolthub/vitess => github.com/paralin/vitess v0.0.0-20220421060337-dfb001a981dd // ext-engines
+
 require (
 	github.com/cespare/xxhash v1.1.0
-	github.com/dolthub/sqllogictest/go v0.0.0-20201107003712-816f3ae12d81
 	github.com/dolthub/vitess v0.0.0-20220420162151-fd557659d30b
 	github.com/go-kit/kit v0.10.0
-	github.com/go-sql-driver/mysql v1.6.0
-	github.com/gocraft/dbr/v2 v2.7.2
 	github.com/golang/glog v0.0.0-20210429001901-424d2337a529
 	github.com/google/uuid v1.2.0
 	github.com/hashicorp/golang-lru v0.5.4
@@ -42,5 +43,3 @@ require (
 )
 
 replace github.com/oliveagle/jsonpath => github.com/dolthub/jsonpath v0.0.0-20210609232853-d49537a30474
-
-go 1.18
