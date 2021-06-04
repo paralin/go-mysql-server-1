@@ -63,7 +63,13 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder) (*Server, error) {
 			serverAddr,
 		),
 	)
-	a := cfg.Auth.Mysql()
+	var a mysql.AuthServer
+	if cfg.Auth != nil {
+		a = cfg.Auth.Mysql()
+	}
+	if a == nil {
+		a = (&auth.None{}).Mysql()
+	}
 	vtListnr, err := mysql.NewListener(a, handler)
 	if err != nil {
 		return nil, err
