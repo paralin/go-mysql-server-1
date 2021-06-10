@@ -45,7 +45,7 @@ func TestCreateIndexAsync(t *testing.T) {
 	idxReg.RegisterIndexDriver(driver)
 	db := memory.NewDatabase("foo")
 	db.AddTable("foo", table)
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	exprs := []sql.Expression{
 		expression.NewGetFieldWithTable(2, sql.Int64, "foo", "c", true),
@@ -100,7 +100,7 @@ func TestCreateIndexNotIndexableExprs(t *testing.T) {
 	idxReg.RegisterIndexDriver(driver)
 	db := memory.NewDatabase("foo")
 	db.AddTable("foo", table)
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	ci := NewCreateIndex(
 		"idx",
@@ -151,7 +151,7 @@ func TestCreateIndexSync(t *testing.T) {
 	idxReg.RegisterIndexDriver(driver)
 	db := memory.NewDatabase("foo")
 	db.AddTable("foo", table)
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	exprs := []sql.Expression{
 		expression.NewGetFieldWithTable(2, sql.Int64, "foo", "c", true),
@@ -208,7 +208,7 @@ func TestCreateIndexChecksum(t *testing.T) {
 	idxReg.RegisterIndexDriver(driver)
 	db := memory.NewDatabase("foo")
 	db.AddTable("foo", table)
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	exprs := []sql.Expression{
 		expression.NewGetFieldWithTable(2, sql.Int64, "foo", "c", true),
@@ -303,7 +303,7 @@ func TestCreateIndexWithIter(t *testing.T) {
 	idxReg.RegisterIndexDriver(driver)
 	db := memory.NewDatabase("foo")
 	db.AddTable("foo", foo)
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	ci := NewCreateIndex("idx", NewResolvedTable(foo, nil, nil), exprs, "mock", make(map[string]string))
 	ci.Catalog = catalog

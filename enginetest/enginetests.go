@@ -30,6 +30,7 @@ import (
 
 	sqle "github.com/dolthub/go-mysql-server"
 	"github.com/dolthub/go-mysql-server/auth"
+	"github.com/dolthub/go-mysql-server/memory"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/analyzer"
 	"github.com/dolthub/go-mysql-server/sql/expression"
@@ -110,7 +111,10 @@ func createIndexes(t *testing.T, harness Harness, engine *sqle.Engine) {
 
 func createForeignKeys(t *testing.T, harness Harness, engine *sqle.Engine) {
 	if fkh, ok := harness.(ForeignKeyHarness); ok && fkh.SupportsForeignKeys() {
-		ctx := NewContextWithEngine(harness, engine)
+		ctx, err := NewContextWithEngine(harness, engine)
+		if err != nil {
+			t.Fatal(err.Error())
+		}
 		TestQueryWithContext(t, ctx, engine, "ALTER TABLE fk_tbl ADD CONSTRAINT fk1 FOREIGN KEY (a,b) REFERENCES mytable (i,s) ON DELETE CASCADE", nil, nil, nil)
 	}
 }
@@ -123,7 +127,11 @@ func TestQueryPlans(t *testing.T, harness Harness) {
 	createForeignKeys(t, harness, engine)
 	for _, tt := range PlanTests {
 		t.Run(tt.Query, func(t *testing.T) {
-			TestQueryPlan(t, NewContextWithEngine(harness, engine), engine, harness, tt.Query, tt.ExpectedPlan)
+			ctx, err := NewContextWithEngine(harness, engine)
+			if err != nil {
+				t.Fatal(err.Error())
+			}
+			TestQueryPlan(t, ctx, engine, harness, tt.Query, tt.ExpectedPlan)
 		})
 	}
 }
@@ -244,7 +252,7 @@ func TestReadOnly(t *testing.T, harness Harness) {
 	})
 
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	au := auth.NewNativeSingle("user", "pass", auth.ReadPerm)
 	cfg := &sqle.Config{Auth: au}
@@ -278,7 +286,7 @@ func TestExplode(t *testing.T, harness Harness) {
 	InsertRows(t, harness.NewContext(), mustInsertableTable(t, table), sql.NewRow(int64(1), []interface{}{"a", "b"}, "first"), sql.NewRow(int64(2), []interface{}{"c", "d"}, "second"), sql.NewRow(int64(3), []interface{}{"e", "f"}, "third"))
 
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 	e := sqle.New(catalog, analyzer.NewDefault(catalog), new(sqle.Config))
 
 	for _, q := range ExplodeQueries {
@@ -3343,19 +3351,23 @@ func NewBaseSession() sql.Session {
 	return sql.NewSession("address", "client", "user", 1)
 }
 
-func NewContextWithEngine(harness Harness, engine *sqle.Engine) *sql.Context {
+func NewContextWithEngine(harness Harness, engine *sqle.Engine) (*sql.Context, error) {
 	ctx := NewContext(harness)
 
 	// TODO: move index driver back out of context, into catalog, make this unnecessary
 	if idh, ok := harness.(IndexDriverHarness); ok {
-		driver := idh.IndexDriver(engine.Catalog.AllDatabases())
+		allDbs, err := engine.Catalog.AllDatabases()
+		if err != nil {
+			return nil, err
+		}
+		driver := idh.IndexDriver(allDbs)
 		if driver != nil {
 			ctx.IndexRegistry.RegisterIndexDriver(driver)
-			ctx.IndexRegistry.LoadIndexes(ctx, engine.Catalog.AllDatabases())
+			ctx.IndexRegistry.LoadIndexes(ctx, allDbs)
 		}
 	}
 
-	return ctx
+	return ctx, nil
 }
 
 // NewEngine creates test data and returns an engine using the harness provided.
@@ -3374,10 +3386,13 @@ func NewEngine(t *testing.T, harness Harness) *sqle.Engine {
 // full harness but want to run your own tests on DBs you create.
 func NewEngineWithDbs(t *testing.T, harness Harness, databases []sql.Database, driver sql.IndexDriver) *sqle.Engine {
 	catalog := sql.NewCatalog()
+	ct := sql.NewDatabases(memory.CreateDbFn)
+	catalog.DatabaseCatalog = ct
+	// ct := catalog.DatabaseCatalog.(*sql.Databases)
 	for _, database := range databases {
-		catalog.AddDatabase(database)
+		ct.AddDatabase(database)
 	}
-	catalog.AddDatabase(information_schema.NewInformationSchemaDatabase(catalog))
+	ct.AddDatabase(information_schema.NewInformationSchemaDatabase(catalog))
 
 	var a *analyzer.Analyzer
 	if harness.Parallelism() > 1 {
@@ -3404,7 +3419,10 @@ func TestQuery(t *testing.T, harness Harness, e *sqle.Engine, q string, expected
 			}
 		}
 
-		ctx := NewContextWithEngine(harness, e)
+		ctx, err := NewContextWithEngine(harness, e)
+		if err != nil {
+			t.Fatal(err.Error())
+		}
 		TestQueryWithContext(t, ctx, e, q, expected, expectedCols, bindings)
 	})
 }

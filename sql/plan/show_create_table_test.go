@@ -46,7 +46,7 @@ func TestShowCreateTable(t *testing.T) {
 	db.AddTable(table.Name(), table)
 
 	cat := sql.NewCatalog()
-	cat.AddDatabase(db)
+	cat.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	showCreateTable := NewShowCreateTable(NewResolvedTable(table, nil, nil), false)
 
@@ -102,7 +102,7 @@ func TestShowCreateTableWithIndexAndForeignKeysAndChecks(t *testing.T) {
 	db.AddTable(table.Name(), table)
 
 	cat := sql.NewCatalog()
-	cat.AddDatabase(db)
+	cat.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	showCreateTable := NewShowCreateTable(NewResolvedTable(table, nil, nil), false)
 	// This mimics what happens during analysis (indexes get filled in for the table)
@@ -181,7 +181,7 @@ func TestShowCreateView(t *testing.T) {
 	db.AddTable(table.Name(), table)
 
 	cat := sql.NewCatalog()
-	cat.AddDatabase(db)
+	cat.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	showCreateTable := NewShowCreateTable(
 		NewSubqueryAlias("myView", "select * from `test-table`", NewResolvedTable(table, nil, nil)),

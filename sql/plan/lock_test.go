@@ -56,7 +56,7 @@ func TestUnlockTables(t *testing.T) {
 	db.AddTable("baz", t3)
 
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	ctx := sql.NewContext(context.Background()).WithCurrentDB("db").WithCurrentDB("db")
 	catalog.LockTable(ctx, "foo")

@@ -391,6 +391,10 @@ func ApplyDefaults(ctx *sql.Context, tblSch sql.Schema, cols []int, row sql.Row)
 }
 
 // AddDatabase adds the given database to the catalog.
+// Note: only works when using the static database list.
 func (e *Engine) AddDatabase(db sql.Database) {
-	e.Catalog.AddDatabase(db)
+	dbs, ok := e.Catalog.DatabaseCatalog.(*sql.Databases)
+	if ok {
+		dbs.AddDatabase(db)
+	}
 }

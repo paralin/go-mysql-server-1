@@ -193,7 +193,11 @@ func TestTestQueryPlanTODOs(t *testing.T) {
 	engine := enginetest.NewEngine(t, harness)
 	for _, tt := range enginetest.QueryPlanTODOs {
 		t.Run(tt.Query, func(t *testing.T) {
-			enginetest.TestQueryPlan(t, enginetest.NewContextWithEngine(harness, engine), engine, harness, tt.Query, tt.ExpectedPlan)
+			ctx, err := enginetest.NewContextWithEngine(harness, engine)
+			if err != nil {
+				t.Fatal(err.Error())
+			}
+			enginetest.TestQueryPlan(t, ctx, engine, harness, tt.Query, tt.ExpectedPlan)
 		})
 	}
 }
@@ -252,7 +256,9 @@ func TestWriteQueryPlans(t *testing.T) {
 	_, _ = w.WriteString("var PlanTests = []QueryPlanTest{\n")
 	for _, tt := range enginetest.PlanTests {
 		_, _ = w.WriteString("\t{\n")
-		ctx := enginetest.NewContextWithEngine(harness, engine)
+		ctx, err := enginetest.NewContextWithEngine(harness, engine)
+		require.NoError(t, err)
+
 		parsed, err := parse.Parse(ctx, tt.Query)
 		require.NoError(t, err)
 

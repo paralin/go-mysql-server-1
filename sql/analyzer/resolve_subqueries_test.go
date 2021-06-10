@@ -44,7 +44,7 @@ func TestResolveSubqueries(t *testing.T) {
 
 	// Unlike most analyzer functions, resolving subqueries needs a fully functioning analyzer
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 	a := withoutProcessTracking(NewDefault(catalog))
 
 	testCases := []analyzerFnTestCase{
@@ -140,7 +140,7 @@ func TestResolveSubqueryExpressions(t *testing.T) {
 
 	// Unlike most analyzer functions, resolving subqueries needs a fully functioning analyzer
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 	a := withoutProcessTracking(NewDefault(catalog))
 
 	testCases := []analyzerFnTestCase{

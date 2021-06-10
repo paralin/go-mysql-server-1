@@ -43,7 +43,7 @@ func DefaultSessionBuilder(ctx context.Context, c *mysql.Conn, addr string) (sql
 type SessionManager struct {
 	addr      string
 	tracer    opentracing.Tracer
-	hasDBFunc func(name string) bool
+	hasDBFunc func(name string) (bool, error)
 	memory    *sql.MemoryManager
 	mu        *sync.Mutex
 	builder   SessionBuilder
@@ -57,7 +57,7 @@ type SessionManager struct {
 func NewSessionManager(
 	builder SessionBuilder,
 	tracer opentracing.Tracer,
-	hasDBFunc func(name string) bool,
+	hasDBFunc func(name string) (bool, error),
 	memory *sql.MemoryManager,
 	addr string,
 ) *SessionManager {
@@ -100,7 +100,11 @@ func (s *SessionManager) SetDB(conn *mysql.Conn, db string) error {
 		return err
 	}
 
-	if db != "" && !s.hasDBFunc(db) {
+	hasDB, err := s.hasDBFunc(db)
+	if err != nil {
+		return err
+	}
+	if db != "" && !hasDB {
 		return sql.ErrDatabaseNotFound.New(db)
 	}
 

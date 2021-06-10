@@ -48,6 +48,7 @@ type CreateIndex struct {
 	Driver          string
 	Config          map[string]string
 	Catalog         *sql.Catalog
+	ProcessList     *sql.ProcessList
 	CurrentDatabase string
 }
 

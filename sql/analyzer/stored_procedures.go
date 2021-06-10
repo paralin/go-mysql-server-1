@@ -51,7 +51,11 @@ func loadStoredProcedures(ctx *sql.Context, a *Analyzer, n sql.Node, scope *Scop
 		a.ProcedureCache.IsPopulating = false
 	}()
 
-	for _, database := range a.Catalog.AllDatabases() {
+	allDbs, err := a.Catalog.AllDatabases()
+	if err != nil {
+		return nil, err
+	}
+	for _, database := range allDbs {
 		if pdb, ok := database.(sql.StoredProcedureDatabase); ok {
 			procedures, err := pdb.GetStoredProcedures(ctx)
 			if err != nil {

@@ -31,7 +31,7 @@ func TestAssignCatalog(t *testing.T) {
 
 	db := memory.NewDatabase("foo")
 	c := sql.NewCatalog()
-	c.AddDatabase(db)
+	c.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	a := NewDefault(c)
 	idxReg := sql.NewIndexRegistry()

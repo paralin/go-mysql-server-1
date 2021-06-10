@@ -21,6 +21,8 @@ import (
 
 	"github.com/dolthub/go-mysql-server/internal/similartext"
 
+	gerrors "errors"
+
 	"gopkg.in/src-d/go-errors.v1"
 )
 
@@ -42,9 +44,9 @@ type Catalog struct {
 	FunctionRegistry
 	*ProcessList
 	*MemoryManager
+	DatabaseCatalog
 
 	mu    sync.RWMutex
-	dbs   Databases
 	locks sessionLocks
 }
 
@@ -60,51 +62,115 @@ func NewCatalog() *Catalog {
 		FunctionRegistry: NewFunctionRegistry(),
 		MemoryManager:    NewMemoryManager(ProcessMemory),
 		ProcessList:      NewProcessList(),
+		DatabaseCatalog:  NewDatabases(nil),
 		locks:            make(sessionLocks),
 	}
 }
 
+// DatabaseCatalog contains a list of databases.
+type DatabaseCatalog interface {
+	// AllDatabases returns all databases in the catalog.
+	AllDatabases() (DatabasesSlice, error)
+	// Database returns the Database with the given name if it exists.
+	Database(name string) (Database, error)
+	// CreateDatabase creates a new database and returns an error if it exists.
+	CreateDatabase(name string) (Database, error)
+	// RemoveDatabase removes a database from the catalog.
+	// Does not return an error if does not exist.
+	RemoveDatabase(dbName string) error
+	// HasDB returns if the database exists.
+	HasDB(db string) (bool, error)
+	// Table returns the Table with the given name if it exists.
+	Table(ctx *Context, dbName string, tableName string) (Table, Database, error)
+	// TableAsOf returns the table with the name given at the time given, if it
+	// existed. The database named must implement sql.VersionedDatabase or an
+	// error is returned.
+	TableAsOf(ctx *Context, dbName string, tableName string, asOf interface{}) (Table, Database, error)
+}
+
+// CreateDbFn is a function to create a database.
+type CreateDbFn func(name string) (Database, error)
+
+// Databases contains a set of databases.
+type Databases struct {
+	mu         sync.RWMutex
+	dbs        DatabasesSlice
+	createDbFn CreateDbFn
+}
+
+// NewDatabases constructs a new empty databases catalog.
+func NewDatabases(createDbFn CreateDbFn) *Databases {
+	return &Databases{createDbFn: createDbFn}
+}
+
 // AllDatabases returns all databases in the catalog.
-func (c *Catalog) AllDatabases() Databases {
+func (c *Databases) AllDatabases() (DatabasesSlice, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var result = make(Databases, len(c.dbs))
+	var result = make(DatabasesSlice, len(c.dbs))
 	copy(result, c.dbs)
-	return result
+	return result, nil
 }
 
 // AddDatabase adds a new database to the catalog.
-func (c *Catalog) AddDatabase(db Database) {
+func (c *Databases) AddDatabase(db Database) {
 	c.mu.Lock()
 	c.dbs.Add(db)
 	c.mu.Unlock()
 }
 
+// CreateDatabase creates a new database and returns an error if it exists.
+func (c *Databases) CreateDatabase(name string) (Database, error) {
+	if c.createDbFn == nil {
+		return nil, gerrors.New("create database not implemented")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	edb, err := c.dbs.Database(name)
+	if edb != nil {
+		return nil, ErrCannotCreateDatabaseExists.New(name)
+	}
+	if err != nil && !ErrDatabaseNotFound.Is(err) {
+		return nil, err
+	}
+
+	ndb, err := c.createDbFn(name)
+	if err != nil {
+		return nil, err
+	}
+	c.dbs.Add(ndb)
+	return ndb, nil
+}
+
 // RemoveDatabase removes a database from the catalog.
-func (c *Catalog) RemoveDatabase(dbName string) {
+// Does not return an error if does not exist.
+func (c *Databases) RemoveDatabase(dbName string) error {
 	c.mu.Lock()
 	c.dbs.Delete(dbName)
 	c.mu.Unlock()
+	return nil
 }
 
-func (c *Catalog) HasDB(db string) bool {
+func (c *Databases) HasDB(db string) (bool, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	_, err := c.dbs.Database(db)
 
-	return err == nil
+	return err == nil, nil
 }
 
 // Database returns the database with the given name.
-func (c *Catalog) Database(db string) (Database, error) {
+func (c *Databases) Database(db string) (Database, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.dbs.Database(db)
 }
 
 // Table returns the table in the given database with the given name.
-func (c *Catalog) Table(ctx *Context, db, table string) (Table, Database, error) {
+func (c *Databases) Table(ctx *Context, db, table string) (Table, Database, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.dbs.Table(ctx, db, table)
@@ -112,17 +178,17 @@ func (c *Catalog) Table(ctx *Context, db, table string) (Table, Database, error)
 
 // TableAsOf returns the table in the given database with the given name, as it existed at the time given. The database
 // named must support timed queries.
-func (c *Catalog) TableAsOf(ctx *Context, db, table string, time interface{}) (Table, Database, error) {
+func (c *Databases) TableAsOf(ctx *Context, db, table string, time interface{}) (Table, Database, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.dbs.TableAsOf(ctx, db, table, time)
 }
 
-// Databases is a collection of Database.
-type Databases []Database
+// DatabasesSlice is a collection of Database.
+type DatabasesSlice []Database
 
 // Database returns the Database with the given name if it exists.
-func (d Databases) Database(name string) (Database, error) {
+func (d DatabasesSlice) Database(name string) (Database, error) {
 	if len(d) == 0 {
 		return nil, ErrDatabaseNotFound.New(name)
 	}
@@ -140,12 +206,12 @@ func (d Databases) Database(name string) (Database, error) {
 }
 
 // Add adds a new database.
-func (d *Databases) Add(db Database) {
+func (d *DatabasesSlice) Add(db Database) {
 	*d = append(*d, db)
 }
 
 // Delete removes a database.
-func (d *Databases) Delete(dbName string) {
+func (d *DatabasesSlice) Delete(dbName string) {
 	idx := -1
 	for i, db := range *d {
 		if db.Name() == dbName {
@@ -160,7 +226,7 @@ func (d *Databases) Delete(dbName string) {
 }
 
 // Table returns the Table with the given name if it exists.
-func (d Databases) Table(ctx *Context, dbName string, tableName string) (Table, Database, error) {
+func (d DatabasesSlice) Table(ctx *Context, dbName string, tableName string) (Table, Database, error) {
 	db, err := d.Database(dbName)
 	if err != nil {
 		return nil, nil, err
@@ -177,6 +243,9 @@ func (d Databases) Table(ctx *Context, dbName string, tableName string) (Table, 
 	return tbl, db, nil
 }
 
+// _ is a type assertion
+var _ DatabaseCatalog = ((*Databases)(nil))
+
 func suggestSimilarTables(db Database, ctx *Context, tableName string) error {
 	tableNames, err := db.GetTableNames(ctx)
 	if err != nil {
@@ -189,7 +258,7 @@ func suggestSimilarTables(db Database, ctx *Context, tableName string) error {
 
 // TableAsOf returns the table with the name given at the time given, if it existed. The database named must implement
 // sql.VersionedDatabase or an error is returned.
-func (d Databases) TableAsOf(ctx *Context, dbName string, tableName string, asOf interface{}) (Table, Database, error) {
+func (d DatabasesSlice) TableAsOf(ctx *Context, dbName string, tableName string, asOf interface{}) (Table, Database, error) {
 	db, err := d.Database(dbName)
 	if err != nil {
 		return nil, nil, err
@@ -250,7 +319,7 @@ func (c *Catalog) UnlockTables(ctx *Context, id uint32) error {
 	var errors []string
 	for db, tables := range c.locks[id] {
 		for t := range tables {
-			table, _, err := c.dbs.Table(ctx, db, t)
+			table, _, err := c.DatabaseCatalog.Table(ctx, db, t)
 			if err == nil {
 				if lockable, ok := table.(Lockable); ok {
 					if e := lockable.Unlock(ctx, id); e != nil {

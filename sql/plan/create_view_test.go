@@ -35,7 +35,7 @@ func mockCreateView(isReplace bool) *CreateView {
 	db.AddTable("db", table)
 
 	catalog := sql.NewCatalog()
-	catalog.AddDatabase(db)
+	catalog.DatabaseCatalog.(*sql.Databases).AddDatabase(db)
 
 	subqueryAlias := NewSubqueryAlias("myview", "select i",
 		NewProject(

@@ -27,24 +27,30 @@ import (
 func TestAllDatabases(t *testing.T) {
 	require := require.New(t)
 
-	var dbs = sql.Databases{
+	var dbs = sql.DatabasesSlice{
 		memory.NewDatabase("a"),
 		memory.NewDatabase("b"),
 		memory.NewDatabase("c"),
 	}
 
 	c := sql.NewCatalog()
+	ct := c.DatabaseCatalog.(*sql.Databases)
 	for _, db := range dbs {
-		c.AddDatabase(db)
+		ct.AddDatabase(db)
 	}
 
-	require.Equal(dbs, c.AllDatabases())
+	odbs, err := c.AllDatabases()
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+	require.Equal(dbs, odbs)
 }
 
 func TestCatalogDatabase(t *testing.T) {
 	require := require.New(t)
 
-	c := sql.NewCatalog()
+	ct := sql.NewCatalog()
+	c := ct.DatabaseCatalog.(*sql.Databases)
 	db, err := c.Database("foo")
 	require.EqualError(err, "database not found: foo")
 	require.Nil(db)
@@ -64,7 +70,8 @@ func TestCatalogDatabase(t *testing.T) {
 func TestCatalogTable(t *testing.T) {
 	require := require.New(t)
 
-	c := sql.NewCatalog()
+	ct := sql.NewCatalog()
+	c := ct.DatabaseCatalog.(*sql.Databases)
 	ctx := sql.NewEmptyContext()
 
 	table, _, err := c.Table(ctx, "foo", "bar")
@@ -103,15 +110,16 @@ func TestCatalogUnlockTables(t *testing.T) {
 	db.AddTable("t1", t1)
 	db.AddTable("t2", t2)
 
-	c := sql.NewCatalog()
+	ct := sql.NewCatalog()
+	c := ct.DatabaseCatalog.(*sql.Databases)
 	c.AddDatabase(db)
 
 	ctx := sql.NewContext(context.Background())
 	ctx.SetCurrentDatabase(db.Name())
-	c.LockTable(ctx, "t1")
-	c.LockTable(ctx, "t2")
+	ct.LockTable(ctx, "t1")
+	ct.LockTable(ctx, "t2")
 
-	require.NoError(c.UnlockTables(ctx, ctx.ID()))
+	require.NoError(ct.UnlockTables(ctx, ctx.ID()))
 
 	require.Equal(1, t1.unlocks)
 	require.Equal(1, t2.unlocks)

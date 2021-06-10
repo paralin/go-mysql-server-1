@@ -20,11 +20,10 @@ import (
 	"github.com/dolthub/vitess/go/mysql"
 	"github.com/dolthub/vitess/go/vt/sqlparser"
 
-	"github.com/dolthub/go-mysql-server/memory"
 	"github.com/dolthub/go-mysql-server/sql"
 )
 
-// CreateDB creates an in memory database that lasts the length of the process only.
+// CreateDB creates a database.
 type CreateDB struct {
 	Catalog     *sql.Catalog
 	dbName      string
@@ -52,7 +51,10 @@ func (c CreateDB) Children() []sql.Node {
 }
 
 func (c CreateDB) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	exists := c.Catalog.HasDB(c.dbName)
+	exists, err := c.Catalog.HasDB(c.dbName)
+	if err != nil {
+		return nil, err
+	}
 	rows := []sql.Row{{sql.OkResult{RowsAffected: 1}}}
 
 	if exists {
@@ -69,8 +71,13 @@ func (c CreateDB) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 		}
 	}
 
-	db := memory.NewDatabase(c.dbName)
-	c.Catalog.AddDatabase(db)
+	// db := memory.NewDatabase(c.dbName)
+	// c.Catalog.AddDatabase(db)
+	db, err := c.Catalog.CreateDatabase(c.dbName)
+	if err != nil {
+		return nil, err
+	}
+	_ = db
 
 	return sql.RowsToRowIter(rows...), nil
 }
@@ -114,7 +121,10 @@ func (d DropDB) Children() []sql.Node {
 }
 
 func (d DropDB) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
-	exists := d.Catalog.HasDB(d.dbName)
+	exists, err := d.Catalog.HasDB(d.dbName)
+	if err != nil {
+		return nil, err
+	}
 	if !exists {
 		if d.IfExists {
 			ctx.Session.Warn(&sql.Warning{
@@ -131,7 +141,10 @@ func (d DropDB) RowIter(ctx *sql.Context, row sql.Row) (sql.RowIter, error) {
 		}
 	}
 
-	d.Catalog.RemoveDatabase(d.dbName)
+	err = d.Catalog.RemoveDatabase(d.dbName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Unsets the current database
 	if ctx.GetCurrentDatabase() == d.dbName {

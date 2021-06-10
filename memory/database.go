@@ -44,6 +44,14 @@ func NewDatabase(name string) *Database {
 	}
 }
 
+// CreateDbFn is the create database function for an in-memory database.
+func CreateDbFn(name string) (sql.Database, error) {
+	return NewDatabase(name), nil
+}
+
+// _ is a type assertion
+var _ sql.CreateDbFn = CreateDbFn
+
 // EnablePrimaryKeyIndexes causes every table created in this database to use an index on its primary keys
 func (d *Database) EnablePrimaryKeyIndexes() {
 	d.primaryKeyIndexes = true
