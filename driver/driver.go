@@ -57,9 +57,19 @@ type Options struct {
 	JSON ScanKind
 }
 
-// A Provider resolves SQL catalogs.
+// Provider resolves SQL catalogs from the DSN.
+// It returns a value used as the "server name."
+// The driver creates a separate sql.Engine for each "server name."
+// Provider can optionally implement ProviderWithContextBuilder.
+// Provider should parse the DSN and use it to adjust the context in NewContext.
 type Provider interface {
-	Resolve(name string, options *Options) (string, sql.DatabaseProvider, error)
+	Resolve(dsn string, options *Options) (string, sql.DatabaseProvider, error)
+}
+
+// ProviderWithContextBuilder is a Provider that also provides a base sql.Context.
+type ProviderWithContextBuilder interface {
+	Provider
+	ContextBuilder
 }
 
 // A Driver exposes an engine as a stdlib SQL driver.
@@ -80,16 +90,18 @@ func New(provider Provider, options *Options) *Driver {
 		sessions = DefaultSessionBuilder{}
 	}
 
-	contexts, ok := provider.(ContextBuilder)
-	if !ok {
-		contexts = DefaultContextBuilder{}
+	var contextBuilder ContextBuilder
+	if provWithCtxBuilder, ok := provider.(ProviderWithContextBuilder); ok {
+		contextBuilder = provWithCtxBuilder
+	} else {
+		contextBuilder = DefaultContextBuilder{}
 	}
 
 	return &Driver{
 		provider: provider,
 		options:  options,
 		sessions: sessions,
-		contexts: contexts,
+		contexts: contextBuilder,
 		dbs:      map[string]*dbConn{},
 	}
 }
@@ -132,26 +144,27 @@ func (d *Driver) OpenConnector(dsn string) (driver.Connector, error) {
 		dsn = dsnURI.String()
 	}
 
-	server, pro, err := d.provider.Resolve(dsn, options)
+	serverName, pro, err := d.provider.Resolve(dsn, options)
 	if err != nil {
 		return nil, err
 	}
 
 	d.mu.Lock()
-	db, ok := d.dbs[server]
+	db, ok := d.dbs[serverName]
 	if !ok {
 		anlz := analyzer.NewDefault(pro)
 		engine := sqle.New(anlz, nil)
 		db = &dbConn{engine: engine}
-		d.dbs[server] = db
+		d.dbs[serverName] = db
 	}
 	d.mu.Unlock()
 
 	return &Connector{
-		driver:  d,
-		options: options,
-		server:  server,
-		dbConn:  db,
+		driver:     d,
+		options:    options,
+		serverName: serverName,
+		dsn:        dsn,
+		dbConn:     db,
 	}, nil
 }
 
@@ -197,17 +210,21 @@ func (c *dbConn) close() error {
 // and can create any number of equivalent Conns for use
 // by multiple goroutines.
 type Connector struct {
-	driver  *Driver
-	options *Options
-	server  string
-	dbConn  *dbConn
+	driver     *Driver
+	options    *Options
+	serverName string
+	dsn        string
+	dbConn     *dbConn
 }
 
 // Driver returns the driver.
 func (c *Connector) Driver() driver.Driver { return c.driver }
 
 // Server returns the server name.
-func (c *Connector) Server() string { return c.server }
+func (c *Connector) Server() string { return c.serverName }
+
+// DSN returns the original DSN passed by the client.
+func (c *Connector) DSN() string { return c.dsn }
 
 // Connect returns a connection to the database.
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
