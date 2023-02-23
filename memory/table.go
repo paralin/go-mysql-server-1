@@ -1480,11 +1480,7 @@ func (t *Table) CreateIndex(ctx *sql.Context, idx sql.IndexDef) error {
 
 // DropIndex implements sql.IndexAlterableTable
 func (t *Table) DropIndex(ctx *sql.Context, indexName string) error {
-	for name := range t.indexes {
-		if name == indexName {
-			delete(t.indexes, name)
-		}
-	}
+	delete(t.indexes, indexName)
 	return nil
 }
 
