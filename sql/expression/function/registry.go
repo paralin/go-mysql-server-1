@@ -19,7 +19,6 @@ import (
 
 	"gopkg.in/src-d/go-errors.v1"
 
-	"github.com/dolthub/go-mysql-server/internal/similartext"
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/expression/function/aggregation"
 	"github.com/dolthub/go-mysql-server/sql/expression/function/aggregation/window"
@@ -290,7 +289,7 @@ var BuiltIns = []sql.Function{
 	sql.Function2{Name: "time_format", Fn: NewTimeFormat},
 	sql.Function1{Name: "time_to_sec", Fn: NewTimeToSec},
 	sql.Function2{Name: "timediff", Fn: NewTimeDiff},
-	sql.FunctionN{Name: "timestamp", Fn: NewTimestamp},
+	sql.FunctionN{Name: "timestamp", Fn: NewDatetime},
 	sql.Function3{Name: "timestampdiff", Fn: NewTimestampDiff},
 	sql.Function1{Name: "to_base64", Fn: NewToBase64},
 	sql.Function1{Name: "to_days", Fn: NewToDays},
@@ -344,12 +343,11 @@ func (r Registry) Register(fn ...sql.Function) error {
 }
 
 // Function implements sql.FunctionProvider
-func (r Registry) Function(ctx *sql.Context, name string) (sql.Function, error) {
+func (r Registry) Function(ctx *sql.Context, name string) (sql.Function, bool) {
 	if fn, ok := r[name]; ok {
-		return fn, nil
+		return fn, true
 	}
-	similar := similartext.FindFromMap(r, name)
-	return nil, sql.ErrFunctionNotFound.New(name + similar)
+	return nil, false
 }
 
 func (r Registry) mustRegister(fn ...sql.Function) {

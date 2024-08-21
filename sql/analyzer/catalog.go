@@ -53,9 +53,6 @@ func (c *Catalog) DropDbStats(ctx *sql.Context, db string, flush bool) error {
 }
 
 var _ sql.Catalog = (*Catalog)(nil)
-var _ sql.FunctionProvider = (*Catalog)(nil)
-var _ sql.TableFunctionProvider = (*Catalog)(nil)
-var _ sql.ExternalStoredProcedureProvider = (*Catalog)(nil)
 var _ binlogreplication.BinlogReplicaCatalog = (*Catalog)(nil)
 var _ binlogreplication.BinlogPrimaryCatalog = (*Catalog)(nil)
 
@@ -75,11 +72,6 @@ func NewCatalog(provider sql.DatabaseProvider) *Catalog {
 		StatsProvider:    memory.NewStatsProv(),
 		locks:            make(sessionLocks),
 	}
-}
-
-// TODO: kill this
-func NewDatabaseProvider(dbs ...sql.Database) sql.DatabaseProvider {
-	return sql.NewDatabaseProvider(dbs...)
 }
 
 func (c *Catalog) HasBinlogReplicaController() bool {
@@ -318,14 +310,12 @@ func (c *Catalog) RegisterFunction(ctx *sql.Context, fns ...sql.Function) {
 	}
 }
 
-// Function returns the function with the name given, or sql.ErrFunctionNotFound if it doesn't exist
-func (c *Catalog) Function(ctx *sql.Context, name string) (sql.Function, error) {
+// Function returns the function with the name given, or false if it doesn't exist.
+func (c *Catalog) Function(ctx *sql.Context, name string) (sql.Function, bool) {
 	if fp, ok := c.DbProvider.(sql.FunctionProvider); ok {
-		f, err := fp.Function(ctx, name)
-		if err != nil && !sql.ErrFunctionNotFound.Is(err) {
-			return nil, err
-		} else if f != nil {
-			return f, nil
+		f, ok := fp.Function(ctx, name)
+		if ok {
+			return f, true
 		}
 	}
 

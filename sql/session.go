@@ -91,7 +91,7 @@ type Session interface {
 	// To access global scope, use sql.StatusVariables instead.
 	GetAllStatusVariables(ctx *Context) map[string]StatusVarValue
 	// IncrementStatusVariable increments the value of the status variable by the integer value
-	IncrementStatusVariable(ctx *Context, statVarName string, val int) error
+	IncrementStatusVariable(ctx *Context, statVarName string, val int)
 	// GetCurrentDatabase gets the current database for this session
 	GetCurrentDatabase() string
 	// SetCurrentDatabase sets the current database for this session
@@ -108,6 +108,10 @@ type Session interface {
 	ClearWarnings()
 	// WarningCount returns a number of session warnings
 	WarningCount() uint16
+	// LockWarnings prevents the session warnings from being cleared.
+	LockWarnings()
+	// UnlockWarnings allows the session warnings to be cleared.
+	UnlockWarnings()
 	// AddLock adds a lock to the set of locks owned by this user which will need to be released if this session terminates
 	AddLock(lockName string) error
 	// DelLock removes a lock from the set of locks owned by this user

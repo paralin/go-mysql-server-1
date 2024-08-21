@@ -164,7 +164,32 @@ func (b *Builder) buildGroupingCols(fromScope, projScope *scope, groupby ast.Gro
 	return groupings
 }
 
+func (b *Builder) buildNameConst(fromScope *scope, f *ast.FuncExpr) sql.Expression {
+	if len(f.Exprs) != 2 {
+		b.handleErr(fmt.Errorf("incorrect parameter count in the call to native function NAME_CONST"))
+	}
+	alias := b.selectExprToExpression(fromScope, f.Exprs[0])
+	aLit, ok := alias.(*expression.Literal)
+	if !ok {
+		b.handleErr(fmt.Errorf("incorrect arguments to: NAME_CONST"))
+	}
+	value := b.selectExprToExpression(fromScope, f.Exprs[1])
+	vLit, ok := value.(*expression.Literal)
+	if !ok {
+		b.handleErr(fmt.Errorf("incorrect arguments to: NAME_CONST"))
+	}
+	var aliasStr string
+	if types.IsText(aLit.Type()) {
+		aliasStr = strings.Trim(aLit.String(), "'")
+	} else {
+		aliasStr = aLit.String()
+	}
+	return expression.NewAlias(aliasStr, vLit)
+}
+
 func (b *Builder) buildAggregation(fromScope, projScope *scope, groupingCols []sql.Expression) *scope {
+	b.qFlags.Set(sql.QFlagAggregation)
+
 	// GROUP_BY consists of:
 	// - input arguments projection
 	// - grouping cols projection
@@ -259,7 +284,7 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 	}
 	gb := inScope.groupBy
 
-	if name == "count" {
+	if strings.EqualFold(name, "count") {
 		if _, ok := e.Exprs[0].(*ast.StarExpr); ok {
 			var agg sql.Aggregation
 			if e.Distinct {
@@ -267,6 +292,7 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 			} else {
 				agg = aggregation.NewCount(expression.NewLiteral(1, types.Int64))
 			}
+			b.qFlags.Set(sql.QFlagCountStar)
 			aggName := strings.ToLower(agg.String())
 			gf := gb.getAggRef(aggName)
 			if gf != nil {
@@ -287,11 +313,13 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 		}
 	}
 
-	if name == "jsonarray" {
+	if strings.EqualFold(name, "jsonarray") {
 		// TODO we don't have any tests for this
 		if _, ok := e.Exprs[0].(*ast.StarExpr); ok {
 			var agg sql.Aggregation
 			agg = aggregation.NewJsonArray(expression.NewLiteral(expression.NewStar(), types.Int64))
+			b.qFlags.Set(sql.QFlagStar)
+
 			//if e.Distinct {
 			//	agg = plan.NewDistinct(expression.NewLiteral(1, types.Int64))
 			//}
@@ -313,6 +341,10 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 			gb.addAggStr(col)
 			return col.scalarGf()
 		}
+	}
+
+	if strings.EqualFold(name, "any_value") {
+		b.qFlags.Set(sql.QFlagAnyAgg)
 	}
 
 	var args []sql.Expression
@@ -363,8 +395,10 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 			args[0] = expression.NewDistinctExpression(args[0])
 		}
 
-		f, err := b.cat.Function(b.ctx, name)
-		if err != nil {
+		f, ok := b.cat.Function(b.ctx, name)
+		if !ok {
+			// todo(max): similar names in registry?
+			err := sql.ErrFunctionNotFound.New(name)
 			b.handleErr(err)
 		}
 
@@ -372,12 +406,16 @@ func (b *Builder) buildAggregateFunc(inScope *scope, name string, e *ast.FuncExp
 		if err != nil {
 			b.handleErr(err)
 		}
-		var ok bool
+
 		agg, ok = newInst.(sql.Aggregation)
 		if !ok {
 			err := fmt.Errorf("expected function to be aggregation: %s", f.FunctionName())
 			b.handleErr(err)
 		}
+	}
+
+	if name == "count" {
+		b.qFlags.Set(sql.QFlagCount)
 	}
 
 	aggType := agg.Type()
@@ -491,16 +529,19 @@ func (b *Builder) buildWindowFunc(inScope *scope, name string, e *ast.FuncExpr, 
 	if name == "count" {
 		if _, ok := e.Exprs[0].(*ast.StarExpr); ok {
 			win = aggregation.NewCount(expression.NewLiteral(1, types.Int64))
+			b.qFlags.Set(sql.QFlagCountStar)
 		}
 	}
 	if win == nil {
-		f, err := b.cat.Function(b.ctx, name)
-		if err != nil {
+		f, ok := b.cat.Function(b.ctx, name)
+		if !ok {
+			// todo(max): similar names in registry?
+			err := sql.ErrFunctionNotFound.New(name)
 			b.handleErr(err)
 		}
 
 		newInst, err := f.NewInstance(args)
-		var ok bool
+
 		win, ok = newInst.(sql.WindowAdaptableExpression)
 		if !ok {
 			err := fmt.Errorf("function is not a window adaptable exprssion: %s", f.FunctionName())

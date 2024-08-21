@@ -27,7 +27,7 @@ import (
 // validatePrivileges verifies the given statement (node n) by checking that the calling user has the necessary privileges
 // to execute it.
 // TODO: add the remaining statements that interact with the grant tables
-func validatePrivileges(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func validatePrivileges(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	mysqlDb := a.Catalog.MySQLDb
 
 	switch n.(type) {
@@ -53,10 +53,6 @@ func validatePrivileges(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.S
 	if plan.IsDualTable(getTable(n)) {
 		return n, transform.SameTree, nil
 	}
-	if rt := getResolvedTable(n); rt != nil && rt.SqlDatabase.Name() == sql.InformationSchemaDatabaseName {
-		return n, transform.SameTree, nil
-	}
-
 	if !n.CheckPrivileges(ctx, mysqlDb) {
 		return nil, transform.SameTree, sql.ErrPrivilegeCheckFailed.New(user.UserHostToString("'"))
 	}

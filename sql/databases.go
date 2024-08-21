@@ -27,7 +27,7 @@ const (
 // DatabaseProvider is the fundamental interface to integrate with the engine. It provides access to all databases in
 // a given backend. A DatabaseProvider is provided to the Catalog when the engine is initialized.
 type DatabaseProvider interface {
-	// Database gets a Database from the provider.
+	// Database returns the database with the name given, or sql.ErrDatabaseNotFound if it doesn't exist.
 	Database(ctx *Context, name string) (Database, error)
 	// HasDatabase checks if the Database exists in the provider.
 	HasDatabase(ctx *Context, name string) bool
@@ -86,12 +86,18 @@ type SchemaDatabase interface {
 	CreateSchema(ctx *Context, schemaName string) error
 	// AllSchemas returns all schemas in the database.
 	AllSchemas(ctx *Context) ([]DatabaseSchema, error)
+	// // GetTable returns the table with the name given in the schema given. The schema name may be empty.
+	// GetTable(ctx *Context, schemaName, tableName string) (Table, bool, error)
+	// // GetTableAsOf returns the table with the name given in the schema given. The schema name may be empty.
+	// GetTableAsOf(ctx *Context, schemaName, tableName string, asOf interface{}) (Table, bool, error)
 }
 
 // DatabaseSchema is a schema that can be queried for tables. It is functionally equivalent to a Database
 // (and in MySQL, database and Schema are synonymous). Some providers may have additional schemas.
 type DatabaseSchema interface {
 	Database
+	// SchemaName returns the schema name for Doltgres, or database name if empty for Dolt.
+	SchemaName() string
 }
 
 // Databaser is a node that contains a reference to a database.

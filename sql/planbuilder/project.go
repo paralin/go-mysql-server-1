@@ -169,6 +169,7 @@ func (b *Builder) analyzeSelectList(inScope, outScope *scope, selectExprs ast.Se
 func (b *Builder) selectExprToExpression(inScope *scope, se ast.SelectExpr) sql.Expression {
 	switch e := se.(type) {
 	case *ast.StarExpr:
+		b.qFlags.Set(sql.QFlagStar)
 		if e.TableName.IsEmpty() {
 			return expression.NewStar()
 		}
@@ -207,6 +208,10 @@ func (b *Builder) buildProjection(inScope, outScope *scope) {
 
 func selectExprNeedsAlias(e *ast.AliasedExpr, expr sql.Expression) bool {
 	if len(e.InputExpression) == 0 {
+		return false
+	}
+
+	if ee, isExpr := e.Expr.(*ast.FuncExpr); isExpr && strings.EqualFold(ee.Name.String(), "name_const") {
 		return false
 	}
 

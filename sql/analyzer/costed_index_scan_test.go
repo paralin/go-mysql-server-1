@@ -851,7 +851,7 @@ Filter
      ├─ index: [xy.x]
      └─ filters: [{[1, 1]}]
 `
-	res, same, err := costedIndexScans(nil, nil, input)
+	res, same, err := costedIndexScans(nil, nil, input, nil)
 	require.NoError(t, err)
 	require.False(t, bool(same))
 	require.Equal(t, strings.TrimSpace(exp), strings.TrimSpace(res.String()), "expected:\n%s,\nfound:\n%s\n", exp, res.String())
@@ -909,16 +909,16 @@ func (i *indexSearchableTable) IndexWithPrefix(ctx *sql.Context, expressions []s
 	panic("implement me")
 }
 
-func (i *indexSearchableTable) LookupForExpressions(ctx *sql.Context, exprs []sql.Expression) (sql.IndexLookup, error) {
+func (i *indexSearchableTable) LookupForExpressions(ctx *sql.Context, exprs ...sql.Expression) (sql.IndexLookup, *sql.FuncDepSet, sql.Expression, bool, error) {
 	if eq, ok := exprs[0].(*expression.Equals); ok {
 		if gf, ok := eq.Left().(*expression.GetField); ok && strings.EqualFold(gf.Name(), "x") {
 			if lit, ok := eq.Right().(*expression.Literal); ok {
 				ranges := sql.RangeCollection{{sql.ClosedRangeColumnExpr(lit.Value(), lit.Value(), lit.Type())}}
-				return sql.IndexLookup{Index: xIdx, Ranges: ranges}, nil
+				return sql.IndexLookup{Index: xIdx, Ranges: ranges}, nil, nil, true, nil
 			}
 		}
 	}
-	return sql.IndexLookup{}, nil
+	return sql.IndexLookup{}, nil, nil, false, nil
 }
 
 func (i *indexSearchableTable) IndexedAccess(lookup sql.IndexLookup) sql.IndexedTable {

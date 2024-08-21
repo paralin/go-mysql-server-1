@@ -40,6 +40,7 @@ type BaseSession struct {
 	idxReg           *IndexRegistry
 	viewReg          *ViewRegistry
 	warnings         []*Warning
+	warningLock      bool
 	warncnt          uint16
 	locks            map[string]bool
 	queriedDb        string
@@ -235,16 +236,16 @@ func (s *BaseSession) GetAllStatusVariables(_ *Context) map[string]StatusVarValu
 }
 
 // IncrementStatusVariable implements the Session interface.
-func (s *BaseSession) IncrementStatusVariable(_ *Context, statVarName string, val int) error {
+func (s *BaseSession) IncrementStatusVariable(ctx *Context, statVarName string, val int) {
 	if _, ok := s.statusVars[statVarName]; !ok {
-		return ErrUnknownSystemVariable.New(statVarName)
+		return
 	}
 	if val < 0 {
 		s.statusVars[statVarName].Increment(-(uint64(-val)))
 	} else {
 		s.statusVars[statVarName].Increment((uint64(val)))
 	}
-	return nil
+	return
 }
 
 // GetCharacterSet returns the character set for this session (defined by the system variable `character_set_connection`).
@@ -340,21 +341,33 @@ func (s *BaseSession) Warnings() []*Warning {
 	for i := 0; i < n; i++ {
 		warns[i] = s.warnings[n-i-1]
 	}
-
 	return warns
+}
+
+// LockWarnings locks the session warnings so that they can't be cleared
+func (s *BaseSession) LockWarnings() {
+	s.warningLock = true
+}
+
+// UnlockWarnings locks the session warnings so that they can be cleared
+func (s *BaseSession) UnlockWarnings() {
+	s.warningLock = false
 }
 
 // ClearWarnings cleans up session warnings
 func (s *BaseSession) ClearWarnings() {
-	cnt := uint16(len(s.warnings))
-	if s.warncnt == cnt {
-		if s.warnings != nil {
-			s.warnings = s.warnings[:0]
-		}
-		s.warncnt = 0
-	} else {
-		s.warncnt = cnt
+	if s.warningLock {
+		return
 	}
+	cnt := uint16(len(s.warnings))
+	if s.warncnt != cnt {
+		s.warncnt = cnt
+		return
+	}
+	if s.warnings != nil {
+		s.warnings = s.warnings[:0]
+	}
+	s.warncnt = 0
 }
 
 // WarningCount returns a number of session warnings
@@ -418,7 +431,6 @@ func (s *BaseSession) SetLastQueryInfoInt(key string, value int64) {
 }
 
 func (s *BaseSession) GetLastQueryInfoInt(key string) int64 {
-
 	value, ok := s.lastQueryInfo[key].Load().(int64)
 	if !ok {
 		panic(fmt.Sprintf("last query info value stored for %s is not an int64 value, but a %T", key, s.lastQueryInfo[key]))

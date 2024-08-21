@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime/trace"
 	"strings"
 
 	"github.com/pmezard/go-difflib/difflib"
@@ -79,9 +80,12 @@ type Builder struct {
 // NewBuilder creates a new Builder from a specific catalog.
 // This builder allow us add custom Rules and modify some internal properties.
 func NewBuilder(pro sql.DatabaseProvider) *Builder {
+	allBeforeDefault := make([]Rule, len(OnceBeforeDefault)+len(AlwaysBeforeDefault))
+	copy(allBeforeDefault, OnceBeforeDefault)
+	copy(allBeforeDefault[len(OnceBeforeDefault):], AlwaysBeforeDefault)
 	return &Builder{
 		provider:        pro,
-		onceBeforeRules: OnceBeforeDefault,
+		onceBeforeRules: allBeforeDefault,
 		defaultRules:    DefaultRules,
 		onceAfterRules:  OnceAfterDefault,
 		validationRules: DefaultValidationRules,
@@ -483,12 +487,12 @@ func newInsertSourceSelector(sel RuleSelector) RuleSelector {
 
 // Analyze applies the transformation rules to the node given. In the case of an error, the last successfully
 // transformed node is returned along with the error.
-func (a *Analyzer) Analyze(ctx *sql.Context, n sql.Node, scope *plan.Scope) (sql.Node, error) {
-	n, _, err := a.analyzeWithSelector(ctx, n, scope, SelectAllBatches, DefaultRuleSelector)
+func (a *Analyzer) Analyze(ctx *sql.Context, n sql.Node, scope *plan.Scope, qFlags *sql.QueryFlags) (sql.Node, error) {
+	n, _, err := a.analyzeWithSelector(ctx, n, scope, SelectAllBatches, DefaultRuleSelector, qFlags)
 	return n, err
 }
 
-func (a *Analyzer) analyzeThroughBatch(ctx *sql.Context, n sql.Node, scope *plan.Scope, until string, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func (a *Analyzer) analyzeThroughBatch(ctx *sql.Context, n sql.Node, scope *plan.Scope, until string, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	stop := false
 	return a.analyzeWithSelector(ctx, n, scope, func(desc string) bool {
 		if stop {
@@ -500,15 +504,16 @@ func (a *Analyzer) analyzeThroughBatch(ctx *sql.Context, n sql.Node, scope *plan
 		// we return true even for the matching description; only start
 		// returning false after this batch.
 		return true
-	}, sel)
+	}, sel, qFlags)
 }
 
 // Every time we recursively invoke the analyzer we increment a depth counter to avoid analyzing queries that could
 // cause infinite recursion. This limit is high but arbitrary
 const maxBatchRecursion = 100
 
-func (a *Analyzer) analyzeWithSelector(ctx *sql.Context, n sql.Node, scope *plan.Scope, batchSelector BatchSelector, ruleSelector RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func (a *Analyzer) analyzeWithSelector(ctx *sql.Context, n sql.Node, scope *plan.Scope, batchSelector BatchSelector, ruleSelector RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	span, ctx := ctx.Span("analyze")
+	defer trace.StartRegion(ctx, "Analyzer.analyzeWithSelector").End()
 
 	if scope.RecursionDepth() > maxBatchRecursion {
 		return n, transform.SameTree, ErrMaxAnalysisIters.New(maxBatchRecursion)
@@ -521,10 +526,16 @@ func (a *Analyzer) analyzeWithSelector(ctx *sql.Context, n sql.Node, scope *plan
 	)
 	a.Log("starting analysis of node of type: %T", n)
 	a.LogNode(n)
-	for _, batch := range a.Batches {
+
+	batches := a.Batches
+	if b, ok := getBatchesForNode(n, batches); ok {
+		batches = b
+	}
+
+	for _, batch := range batches {
 		if batchSelector(batch.Desc) {
 			a.PushDebugContext(batch.Desc)
-			n, same, err = batch.Eval(ctx, a, n, scope, ruleSelector)
+			n, same, err = batch.Eval(ctx, a, n, scope, ruleSelector, qFlags)
 			allSame = allSame && same
 			if err != nil {
 				a.Log("Encountered error: %v", err)
@@ -545,7 +556,7 @@ func (a *Analyzer) analyzeWithSelector(ctx *sql.Context, n sql.Node, scope *plan
 	return n, allSame, err
 }
 
-func (a *Analyzer) analyzeStartingAtBatch(ctx *sql.Context, n sql.Node, scope *plan.Scope, startAt string, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func (a *Analyzer) analyzeStartingAtBatch(ctx *sql.Context, n sql.Node, scope *plan.Scope, startAt string, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	start := false
 	return a.analyzeWithSelector(ctx, n, scope, func(desc string) bool {
 		if desc == startAt {
@@ -555,7 +566,7 @@ func (a *Analyzer) analyzeStartingAtBatch(ctx *sql.Context, n sql.Node, scope *p
 			return true
 		}
 		return false
-	}, sel)
+	}, sel, qFlags)
 }
 
 func DeepCopyNode(node sql.Node) (sql.Node, error) {
@@ -564,4 +575,24 @@ func DeepCopyNode(node sql.Node) (sql.Node, error) {
 		return e, transform.NewTree, err
 	})
 	return n, err
+}
+
+// FlagIsSet returns whether a set of query flag has the |flag| bit marked,
+// or a default value if |flags| is nil. Flags for rule selecting are
+// enabled by default (true), flags for execution behavior are disabled by
+// default (false).
+func FlagIsSet(flags *sql.QueryFlags, flag int) bool {
+	if flags == nil {
+		switch flag {
+		case sql.QFlagMax1Row:
+			// no spooling shortcuts
+			return false
+		default:
+			// default behavior with |nil| flags is execute all
+			// analyzer rules
+			return true
+
+		}
+	}
+	return flags.IsSet(flag)
 }

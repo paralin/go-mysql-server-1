@@ -73,7 +73,7 @@ func (b *Builder) resolveDbForTable(table ast.TableName) sql.Database {
 			b.handleErr(err)
 		}
 		if !ok {
-			b.handleErr(sql.ErrDatabaseNotFound.New(schema))
+			b.handleErr(sql.ErrDatabaseSchemaNotFound.New(schema))
 		}
 	}
 
@@ -113,21 +113,21 @@ func (b *Builder) buildAlterTable(inScope *scope, query string, c *ast.AlterTabl
 	return
 }
 
-func (b *Builder) buildDDL(inScope *scope, query string, c *ast.DDL) (outScope *scope) {
+func (b *Builder) buildDDL(inScope *scope, subQuery string, fullQuery string, c *ast.DDL) (outScope *scope) {
 	outScope = inScope.push()
 	switch strings.ToLower(c.Action) {
 	case ast.CreateStr:
 		if c.TriggerSpec != nil {
-			return b.buildCreateTrigger(inScope, query, c)
+			return b.buildCreateTrigger(inScope, subQuery, fullQuery, c)
 		}
 		if c.ProcedureSpec != nil {
-			return b.buildCreateProcedure(inScope, query, c)
+			return b.buildCreateProcedure(inScope, subQuery, fullQuery, c)
 		}
 		if c.EventSpec != nil {
-			return b.buildCreateEvent(inScope, query, c)
+			return b.buildCreateEvent(inScope, subQuery, fullQuery, c)
 		}
 		if c.ViewSpec != nil {
-			return b.buildCreateView(inScope, query, c)
+			return b.buildCreateView(inScope, subQuery, fullQuery, c)
 		}
 		return b.buildCreateTable(inScope, c)
 	case ast.DropStr:
@@ -170,9 +170,9 @@ func (b *Builder) buildDDL(inScope *scope, query string, c *ast.DDL) (outScope *
 		return b.buildDropTable(inScope, c)
 	case ast.AlterStr:
 		if c.EventSpec != nil {
-			return b.buildAlterEvent(inScope, query, c)
+			return b.buildAlterEvent(inScope, subQuery, fullQuery, c)
 		} else if !c.User.IsEmpty() {
-			return b.buildAlterUser(inScope, query, c)
+			return b.buildAlterUser(inScope, subQuery, c)
 		}
 		b.handleErr(sql.ErrUnsupportedFeature.New(ast.String(c)))
 	case ast.RenameStr:
@@ -289,6 +289,7 @@ func (b *Builder) buildCreateTable(inScope *scope, c *ast.DDL) (outScope *scope)
 		TableOpts: tblOpts,
 	}
 
+	b.qFlags.Set(sql.QFlagSetDatabase)
 	if c.OptSelect != nil {
 		selectScope := b.buildSelectStmt(inScope, c.OptSelect.Select)
 		outScope.node = plan.NewCreateTableSelect(database, c.Table.Name.String(), c.IfNotExists, c.Temporary, selectScope.node, tableSpec)
@@ -418,6 +419,7 @@ func (b *Builder) buildCreateTableLike(inScope *scope, ct *ast.DDL) *scope {
 
 	database := b.resolveDbForTable(ct.Table)
 
+	b.qFlags.Set(sql.QFlagSetDatabase)
 	outScope.node = plan.NewCreateTable(database, newTableName, ct.IfNotExists, ct.Temporary, tableSpec)
 	return outScope
 }
@@ -526,14 +528,14 @@ func (b *Builder) buildAlterTableClause(inScope *scope, ddl *ast.DDL) []*scope {
 
 		for _, s := range outScopes {
 			if ts, ok := s.node.(sql.SchemaTarget); ok {
-				s.node = b.modifySchemaTarget(s, ts, rt)
+				s.node = b.modifySchemaTarget(s, ts, rt.Schema())
 			}
 		}
 		pkt, _ := rt.Table.(sql.PrimaryKeyTable)
 		if pkt != nil {
 			for _, s := range outScopes {
 				if ts, ok := s.node.(sql.PrimaryKeySchemaTarget); ok {
-					s.node = b.modifySchemaTarget(inScope, ts, rt)
+					s.node = b.modifySchemaTarget(inScope, ts, rt.Schema())
 					ts.WithPrimaryKeySchema(pkt.PrimaryKeySchema())
 				}
 			}
@@ -837,7 +839,7 @@ func (b *Builder) buildAlterIndex(inScope *scope, ddl *ast.DDL, table *plan.Reso
 		}
 
 		createIndex := plan.NewAlterCreateIndex(table.SqlDatabase, table, ddl.IndexSpec.ToName.String(), using, constraint, columns, comment)
-		outScope.node = b.modifySchemaTarget(inScope, createIndex, table)
+		outScope.node = b.modifySchemaTarget(inScope, createIndex, table.Schema())
 		return
 	case ast.DropStr:
 		if ddl.IndexSpec.Type == ast.PrimaryStr {
@@ -923,7 +925,7 @@ func (b *Builder) buildAlterDefault(inScope *scope, ddl *ast.DDL, table *plan.Re
 			if strings.EqualFold(c.Name, ddl.DefaultSpec.Column.String()) {
 				defaultExpr := b.convertDefaultExpression(inScope, ddl.DefaultSpec.Value, c.Type, c.Nullable)
 				defSet := plan.NewAlterDefaultSet(table.Database(), table, ddl.DefaultSpec.Column.String(), defaultExpr)
-				outScope.node = b.modifySchemaTarget(inScope, defSet, table)
+				outScope.node = b.modifySchemaTarget(inScope, defSet, table.Schema())
 				return
 			}
 		}
@@ -1357,8 +1359,9 @@ func (b *Builder) columnDefinitionToColumn(inScope *scope, cd *ast.ColumnDefinit
 	}
 }
 
-func (b *Builder) modifySchemaTarget(inScope *scope, n sql.SchemaTarget, rt *plan.ResolvedTable) sql.Node {
-	targSchema := b.resolveSchemaDefaults(inScope, rt.Schema())
+// modifySchemaTarget resolves the schema defaults and sets the target schema for the node.
+func (b *Builder) modifySchemaTarget(inScope *scope, n sql.SchemaTarget, sch sql.Schema) sql.Node {
+	targSchema := b.resolveSchemaDefaults(inScope, sch)
 	ret, err := n.WithTargetSchema(targSchema)
 	if err != nil {
 		b.handleErr(err)
@@ -1387,17 +1390,26 @@ func (b *Builder) resolveSchemaDefaults(inScope *scope, schema sql.Schema) sql.S
 	}
 
 	newSch := schema.Copy()
-	for _, part := range partitionTableColumns(newSch) {
-		start := part[0]
-		end := part[1]
-		subScope := inScope.replace()
-		for i := start; i < end; i++ {
-			subScope.addColumn(inScope.cols[i])
+	partitions := partitionTableColumns(newSch)
+	if len(partitions) == 1 {
+		for _, col := range newSch {
+			col.Default = b.resolveColumnDefaultExpression(inScope, col, col.Default)
+			col.Generated = b.resolveColumnDefaultExpression(inScope, col, col.Generated)
+			col.OnUpdate = b.resolveColumnDefaultExpression(inScope, col, col.OnUpdate)
 		}
-		for _, col := range newSch[start:end] {
-			col.Default = b.resolveColumnDefaultExpression(subScope, col, col.Default)
-			col.Generated = b.resolveColumnDefaultExpression(subScope, col, col.Generated)
-			col.OnUpdate = b.resolveColumnDefaultExpression(subScope, col, col.OnUpdate)
+	} else {
+		for _, part := range partitions {
+			start := part[0]
+			end := part[1]
+			subScope := inScope.replace()
+			for i := start; i < end; i++ {
+				subScope.addColumn(inScope.cols[i])
+			}
+			for _, col := range newSch[start:end] {
+				col.Default = b.resolveColumnDefaultExpression(subScope, col, col.Default)
+				col.Generated = b.resolveColumnDefaultExpression(subScope, col, col.Generated)
+				col.OnUpdate = b.resolveColumnDefaultExpression(subScope, col, col.OnUpdate)
+			}
 		}
 	}
 	return newSch
@@ -1441,7 +1453,7 @@ func (b *Builder) resolveColumnDefaultExpression(inScope *scope, columnDef *sql.
 		return b.convertDefaultExpression(inScope, &ast.SQLVal{Val: []byte{}, Type: ast.StrVal}, columnDef.Type, columnDef.Nullable)
 	}
 
-	parsed, err := ast.Parse(fmt.Sprintf("SELECT %s", def))
+	parsed, err := b.parser.ParseSimple(fmt.Sprintf("SELECT %s", def))
 	if err != nil {
 		err := fmt.Errorf("%w: %s", sql.ErrInvalidColumnDefaultValue.New(def), err)
 		b.handleErr(err)
@@ -1520,6 +1532,10 @@ func (b *Builder) buildDBDDL(inScope *scope, c *ast.DBDDL) (outScope *scope) {
 	outScope = inScope.push()
 	switch strings.ToLower(c.Action) {
 	case ast.CreateStr:
+		if strings.ContainsRune(c.DBName, '/') {
+			b.handleErr(sql.ErrInvalidDatabaseName.New(c.DBName))
+		}
+
 		var charsetStr, collationStr string
 		if len(c.CharsetCollate) != 0 && b.ctx != nil && b.ctx.Session != nil {
 			b.ctx.Session.Warn(&sql.Warning{

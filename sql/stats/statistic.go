@@ -19,6 +19,7 @@ package stats
 // interfaces defined in |sql|, but the separation is necessary for import conflicts.
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"time"
@@ -163,24 +164,36 @@ func (s *Statistic) Histogram() sql.Histogram {
 }
 
 func (s *Statistic) WithDistinctCount(i uint64) sql.Statistic {
+	if i == s.DistinctCnt {
+		return s
+	}
 	ret := *s
 	ret.DistinctCnt = i
 	return &ret
 }
 
 func (s *Statistic) WithRowCount(i uint64) sql.Statistic {
+	if i == s.RowCnt {
+		return s
+	}
 	ret := *s
 	ret.RowCnt = i
 	return &ret
 }
 
 func (s *Statistic) WithNullCount(i uint64) sql.Statistic {
+	if i == s.NullCnt {
+		return s
+	}
 	ret := *s
 	ret.NullCnt = i
 	return &ret
 }
 
 func (s *Statistic) WithAvgSize(i uint64) sql.Statistic {
+	if i == s.AvgRowSize {
+		return s
+	}
 	ret := *s
 	ret.AvgRowSize = i
 	return &ret
@@ -207,6 +220,10 @@ func (s *Statistic) WithHistogram(h sql.Histogram) (sql.Statistic, error) {
 
 func (s *Statistic) IndexClass() sql.IndexClass {
 	return sql.IndexClass(s.IdxClass)
+}
+
+func (s *Statistic) Clone(context.Context) sql.JSONWrapper {
+	return s
 }
 
 func (s *Statistic) ToInterface() (interface{}, error) {
@@ -261,7 +278,7 @@ func ParseTypeStrings(typs []string) ([]sql.Type, error) {
 	return ret, nil
 }
 
-func NewHistogramBucket(rowCount, distinctCount, nullCount, boundCount uint64, boundValue sql.Row, mcvCounts []uint64, mcvs []sql.Row) *Bucket {
+func NewHistogramBucket(rowCount, distinctCount, nullCount, boundCount uint64, boundValue sql.Row, mcvCounts []uint64, mcvs []sql.Row) sql.HistogramBucket {
 	return &Bucket{
 		RowCnt:      rowCount,
 		DistinctCnt: distinctCount,

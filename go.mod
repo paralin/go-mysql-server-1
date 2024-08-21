@@ -1,11 +1,9 @@
 module github.com/dolthub/go-mysql-server
 
-go 1.22
-
-toolchain go1.22.2
+go 1.22.2
 
 // uses protobuf-go-lite
-replace github.com/dolthub/vitess => github.com/aperturerobotics/vitess v0.0.0-20240504090652-3d33aa710fbd // aperture
+replace github.com/dolthub/vitess => github.com/aperturerobotics/vitess v0.0.0-20240821040752-39ac045ae8fe // aperture
 
 require (
 	github.com/cespare/xxhash/v2 v2.2.0
@@ -31,7 +29,6 @@ require (
 	golang.org/x/sys v0.18.0
 	golang.org/x/text v0.6.0
 	golang.org/x/tools v0.13.0
-	google.golang.org/grpc v1.53.0
 	gopkg.in/src-d/go-errors.v1 v1.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -41,12 +38,9 @@ require (
 	github.com/aperturerobotics/json-iterator-lite v1.0.0 // indirect
 	github.com/aperturerobotics/protobuf-go-lite v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
 	github.com/tetratelabs/wazero v1.1.0 // indirect
 	golang.org/x/mod v0.12.0 // indirect
-	google.golang.org/genproto v0.0.0-20230110181048-76db0878b65f // indirect
-	google.golang.org/protobuf v1.34.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20200902074654-038fdea0a05b // indirect
 )

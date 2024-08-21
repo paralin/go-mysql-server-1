@@ -38,8 +38,8 @@ type routineTable struct {
 
 var (
 	_ Table           = (*routineTable)(nil)
-	_ Databaseable    = (*ColumnsTable)(nil)
-	_ StatisticsTable = (*ColumnsTable)(nil)
+	_ Databaseable    = (*routineTable)(nil)
+	_ StatisticsTable = (*routineTable)(nil)
 )
 
 func (r *routineTable) AssignCatalog(cat Catalog) Table {
@@ -154,7 +154,7 @@ func routinesRowIter(ctx *Context, c Catalog, p map[string][]*plan.Procedure) (R
 			}
 
 			// todo shortcircuit routineDef->procedure.CreateProcedureString?
-			parsedProcedure, err := planbuilder.Parse(ctx, c, procedure.CreateProcedureString)
+			parsedProcedure, _, err := planbuilder.Parse(ctx, c, procedure.CreateProcedureString)
 			if err != nil {
 				continue
 			}

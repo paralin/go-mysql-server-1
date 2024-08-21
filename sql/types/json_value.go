@@ -15,6 +15,8 @@
 package types
 
 import (
+	"bytes"
+	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -51,7 +53,23 @@ func StringifyJSON(jsonWrapper sql.JSONWrapper) (string, error) {
 
 // JSONBytes are values which can be represented as JSON.
 type JSONBytes interface {
+	sql.JSONWrapper
 	GetBytes() ([]byte, error)
+}
+
+func MarshallJsonValue(value interface{}) ([]byte, error) {
+	buffer := &bytes.Buffer{}
+	encoder := json.NewEncoder(buffer)
+	// Prevents special characters like <, >, or & from being escaped.
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(value)
+	if err != nil {
+		return nil, err
+	}
+	// json.Encoder appends a newline character so we trim it.
+	// SELECT cast('6\n' as JSON) returns only 6 in MySQL.
+	out := bytes.TrimRight(buffer.Bytes(), "\n")
+	return out, err
 }
 
 // JSONBytes returns or generates a byte array for the JSON representation of the underlying sql.JSONWrapper
@@ -63,22 +81,37 @@ func MarshallJson(jsonWrapper sql.JSONWrapper) ([]byte, error) {
 	if err != nil {
 		return []byte{}, err
 	}
-	return json.Marshal(val)
+	return MarshallJsonValue(val)
 }
 
 type JsonObject = map[string]interface{}
 type JsonArray = []interface{}
 
+type SearchableJSON interface {
+	sql.JSONWrapper
+	Lookup(ctx context.Context, path string) (sql.JSONWrapper, error)
+}
+
+type ComparableJSON interface {
+	sql.JSONWrapper
+	Compare(other interface{}) (int, error)
+	Type(ctx context.Context) (string, error)
+}
+
+// MutableJSON is a JSON value that can be efficiently modified. These modifications return the new value, but they
+// are not required to preserve the state of the original value. If you want to preserve the old value, call |Clone|
+// first and modify the clone, which is guaranteed to not affect the original.
 type MutableJSON interface {
+	sql.JSONWrapper
 	// Insert Adds the value at the given path, only if it is not present. Updated value returned, and bool indicating if
 	// a change was made.
-	Insert(path string, val sql.JSONWrapper) (MutableJSON, bool, error)
+	Insert(ctx context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error)
 	// Remove the value at the given path. Updated value returned, and bool indicating if a change was made.
-	Remove(path string) (MutableJSON, bool, error)
+	Remove(ctx context.Context, path string) (MutableJSON, bool, error)
 	// Set the value at the given path. Updated value returned, and bool indicating if a change was made.
-	Set(path string, val sql.JSONWrapper) (MutableJSON, bool, error)
+	Set(ctx context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error)
 	// Replace the value at the given path with the new value. If the path does not exist, no modification is made.
-	Replace(path string, val sql.JSONWrapper) (MutableJSON, bool, error)
+	Replace(ctx context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error)
 	// ArrayInsert inserts into the array object referenced by the given path. If the path does not exist, no modification is made.
 	ArrayInsert(path string, val sql.JSONWrapper) (MutableJSON, bool, error)
 	// ArrayAppend appends to an  array object referenced by the given path. If the path does not exist, no modification is made,
@@ -93,6 +126,7 @@ type JSONDocument struct {
 
 var _ sql.JSONWrapper = JSONDocument{}
 var _ MutableJSON = JSONDocument{}
+var _ SearchableJSON = JSONDocument{}
 
 func (doc JSONDocument) ToInterface() (interface{}, error) {
 	return doc.Val, nil
@@ -119,18 +153,12 @@ func (doc JSONDocument) String() string {
 	return result
 }
 
-// Contains returns nil in case of a nil value for either the doc.Val or candidate. Otherwise
-// it returns a bool
-func (doc JSONDocument) Contains(candidate sql.JSONWrapper) (val interface{}, err error) {
-	candidateVal, err := candidate.ToInterface()
-	if err != nil {
-		return nil, err
-	}
-	return ContainsJSON(doc.Val, candidateVal)
+func (doc JSONDocument) Lookup(ctx context.Context, path string) (sql.JSONWrapper, error) {
+	return lookupJson(doc.Val, path)
 }
 
-func (doc JSONDocument) Extract(path string) (sql.JSONWrapper, error) {
-	return LookupJSONValue(doc, path)
+func (doc JSONDocument) Clone(context.Context) sql.JSONWrapper {
+	return &JSONDocument{Val: DeepCopyJson(doc.Val)}
 }
 
 // LazyJSONDocument is an implementation of sql.JSONWrapper that wraps a JSON string and defers deserializing
@@ -157,6 +185,11 @@ func NewLazyJSONDocument(bytes []byte) sql.JSONWrapper {
 			return val, nil
 		}),
 	}
+}
+
+// Clone implements sql.JSONWrapper.
+func (j *LazyJSONDocument) Clone(context.Context) sql.JSONWrapper {
+	return NewLazyJSONDocument(j.Bytes)
 }
 
 func (j *LazyJSONDocument) ToInterface() (interface{}, error) {
@@ -187,30 +220,58 @@ func LookupJSONValue(j sql.JSONWrapper, path string) (sql.JSONWrapper, error) {
 		return j, nil
 	}
 
+	if searchableJson, ok := j.(SearchableJSON); ok {
+		ctx := context.Background()
+		return searchableJson.Lookup(ctx, path)
+	}
+
+	r, err := j.ToInterface()
+	if err != nil {
+		return nil, err
+	}
+	if j == nil {
+		return nil, nil
+	}
+
+	return lookupJson(r, path)
+}
+
+func lookupJson(j interface{}, path string) (SearchableJSON, error) {
+	// Lookup(obj) throws an error if obj is nil. We want lookups on a json null
+	// to always result in sql NULL, except in the case of the identity lookup
+	// $.
+	if j == nil {
+		return nil, nil
+	}
+
 	c, err := jsonpath.Compile(path)
 	if err != nil {
 		// Until we throw out jsonpath, let's at least make this error better.
 		if err.Error() == "should start with '$'" {
 			err = fmt.Errorf("Invalid JSON path expression. Path must start with '$', but received: '%s'", path)
 		}
+		// jsonpath poorly handles unmatched [] in paths.
+		if strings.Contains(err.Error(), "len(tail) should") {
+			return nil, fmt.Errorf("Invalid JSON path expression. Missing ']'")
+		}
 		return nil, err
 	}
 
-	// Lookup(obj) throws an error if obj is nil. We want lookups on a json null
-	// to always result in sql NULL, except in the case of the identity lookup
-	// $.
-	r, err := j.ToInterface()
-	if err != nil {
-		return nil, err
-	}
-	if r == nil {
+	// For non-object, non-array candidates, if the path is not "$", return SQL NULL
+	_, isObject := j.(JsonObject)
+	_, isArray := j.(JsonArray)
+	if !isObject && !isArray {
 		return nil, nil
 	}
 
-	val, err := c.Lookup(r)
+	val, err := c.Lookup(j)
 	if err != nil {
 		if strings.Contains(err.Error(), "key error") {
 			// A missing key results in a SQL null
+			return nil, nil
+		}
+		if strings.Contains(err.Error(), "index out of range") {
+			// A array index out of bounds results in a SQL null
 			return nil, nil
 		}
 		return nil, err
@@ -247,9 +308,9 @@ func ConcatenateJSONValues(ctx *sql.Context, vals ...sql.JSONWrapper) (sql.JSONW
 	return JSONDocument{Val: arr}, nil
 }
 
-func ContainsJSON(a, b interface{}) (interface{}, error) {
-	if a == nil || b == nil {
-		return nil, nil
+func ContainsJSON(a, b interface{}) (bool, error) {
+	if a == nil {
+		return b == nil, nil
 	}
 
 	switch a := a.(type) {
@@ -445,6 +506,15 @@ func CompareJSON(a, b interface{}) (int, error) {
 	var err error
 	if hasNulls, res := CompareNulls(b, a); hasNulls {
 		return res, nil
+	}
+
+	if comparableA, ok := a.(ComparableJSON); ok {
+		return comparableA.Compare(b)
+	}
+
+	if comparableB, ok := b.(ComparableJSON); ok {
+		result, err := comparableB.Compare(a)
+		return -result, err
 	}
 
 	switch a := a.(type) {
@@ -697,12 +767,12 @@ func jsonObjectDeterministicOrder(a, b JsonObject, inter []string) (int, error) 
 	return strings.Compare(aa, bb), nil
 }
 
-func (doc JSONDocument) Insert(path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
+func (doc JSONDocument) Insert(_ context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
 	path = strings.TrimSpace(path)
 	return doc.unwrapAndExecute(path, val, INSERT)
 }
 
-func (doc JSONDocument) Remove(path string) (MutableJSON, bool, error) {
+func (doc JSONDocument) Remove(ctx context.Context, path string) (MutableJSON, bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "$" {
 		return nil, false, fmt.Errorf("The path expression '$' is not allowed in this context.")
@@ -711,12 +781,12 @@ func (doc JSONDocument) Remove(path string) (MutableJSON, bool, error) {
 	return doc.unwrapAndExecute(path, nil, REMOVE)
 }
 
-func (doc JSONDocument) Set(path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
+func (doc JSONDocument) Set(ctx context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
 	path = strings.TrimSpace(path)
 	return doc.unwrapAndExecute(path, val, SET)
 }
 
-func (doc JSONDocument) Replace(path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
+func (doc JSONDocument) Replace(ctx context.Context, path string, val sql.JSONWrapper) (MutableJSON, bool, error) {
 	path = strings.TrimSpace(path)
 	return doc.unwrapAndExecute(path, val, REPLACE)
 }

@@ -58,7 +58,7 @@ func (b *BaseBuilder) buildInsertInto(ctx *sql.Context, ii *plan.InsertInto, row
 
 	var unlocker func()
 	insertExpressions := getInsertExpressions(ii.Source)
-	if ii.HasUnspecifiedAutoInc {
+	if ii.FirstGeneratedAutoIncRowIdx >= 0 {
 		_, i, _ := sql.SystemVariables.GetGlobal("innodb_autoinc_lock_mode")
 		lockMode, ok := i.(int64)
 		if !ok {
@@ -79,19 +79,19 @@ func (b *BaseBuilder) buildInsertInto(ctx *sql.Context, ii *plan.InsertInto, row
 		}
 	}
 	insertIter := &insertIter{
-		schema:              dstSchema,
-		tableNode:           ii.Destination,
-		inserter:            inserter,
-		replacer:            replacer,
-		updater:             updater,
-		rowSource:           rowIter,
-		hasAutoAutoIncValue: ii.HasUnspecifiedAutoInc,
-		unlocker:            unlocker,
-		updateExprs:         ii.OnDupExprs,
-		insertExprs:         insertExpressions,
-		checks:              ii.Checks(),
-		ctx:                 ctx,
-		ignore:              ii.Ignore,
+		schema:                      dstSchema,
+		tableNode:                   ii.Destination,
+		inserter:                    inserter,
+		replacer:                    replacer,
+		updater:                     updater,
+		rowSource:                   rowIter,
+		unlocker:                    unlocker,
+		updateExprs:                 ii.OnDupExprs,
+		insertExprs:                 insertExpressions,
+		checks:                      ii.Checks(),
+		ctx:                         ctx,
+		ignore:                      ii.Ignore,
+		firstGeneratedAutoIncRowIdx: ii.FirstGeneratedAutoIncRowIdx,
 	}
 
 	var ed sql.EditOpenerCloser
@@ -262,20 +262,23 @@ func (b *BaseBuilder) buildTriggerRollback(ctx *sql.Context, n *plan.TriggerRoll
 		return nil, err
 	}
 
-	ctx.GetLogger().Tracef("TriggerRollback creating savepoint: %s", SavePointName)
+	savePointCounter := b.triggerSavePointCounter + 1
+	savePointName := fmt.Sprintf("%s%v", TriggerSavePointPrefix, savePointCounter)
+	ctx.GetLogger().Tracef("TriggerRollback creating savepoint: %s", savePointName)
 
 	ts, ok := ctx.Session.(sql.TransactionSession)
 	if !ok {
 		return nil, fmt.Errorf("expected a sql.TransactionSession, but got %T", ctx.Session)
 	}
 
-	if err := ts.CreateSavepoint(ctx, ctx.GetTransaction(), SavePointName); err != nil {
+	if err := ts.CreateSavepoint(ctx, ctx.GetTransaction(), savePointName); err != nil {
 		ctx.GetLogger().WithError(err).Errorf("CreateSavepoint failed")
 	}
+	b.triggerSavePointCounter = savePointCounter
 
 	return &triggerRollbackIter{
-		child:        childIter,
-		hasSavepoint: true,
+		child:         childIter,
+		savePointName: savePointName,
 	}, nil
 }
 
@@ -293,6 +296,7 @@ func (b *BaseBuilder) buildTriggerBeginEndBlock(ctx *sql.Context, n *plan.Trigge
 		statements: n.Children(),
 		row:        row,
 		once:       &sync.Once{},
+		b:          b,
 	}, nil
 }
 
@@ -308,6 +312,7 @@ func (b *BaseBuilder) buildTriggerExecutor(ctx *sql.Context, n *plan.TriggerExec
 		triggerEvent:   n.TriggerEvent,
 		executionLogic: n.Right(),
 		ctx:            ctx,
+		b:              b,
 	}, nil
 }
 
@@ -326,15 +331,7 @@ func (b *BaseBuilder) buildRowUpdateAccumulator(ctx *sql.Context, n *plan.RowUpd
 	var rowHandler accumulatorRowHandler
 	switch n.RowUpdateType {
 	case plan.UpdateTypeInsert:
-		insertItr, err := findInsertIter(rowIter)
-		if err != nil {
-			return nil, err
-		}
-
-		rowHandler = &insertRowHandler{
-			lastInsertIdGetter: insertItr.getAutoIncVal,
-		}
-		// TODO: some of these other row handlers also need to keep track of the last insert id
+		rowHandler = &insertRowHandler{}
 	case plan.UpdateTypeReplace:
 		rowHandler = &replaceRowHandler{}
 	case plan.UpdateTypeDuplicateKeyUpdate:
@@ -367,6 +364,27 @@ func (b *BaseBuilder) buildRowUpdateAccumulator(ctx *sql.Context, n *plan.RowUpd
 		}
 
 		rowHandler = &updateJoinRowHandler{joinSchema: schema, tableMap: plan.RecreateTableSchemaFromJoinSchema(schema), updaterMap: updaterMap}
+		var iter = rowIter
+		var done bool
+		for !done {
+			switch i := iter.(type) {
+			case *plan.TableEditorIter:
+				iter = i.InnerIter()
+			case *updateIter:
+				iter = i.childIter
+			case *updateJoinIter:
+				i.accumulator = rowHandler.(*updateJoinRowHandler)
+				done = true
+			case *projectIter:
+				iter = i.childIter
+			case *plan.CheckpointingTableEditorIter:
+				iter = i.InnerIter()
+			case *triggerIter:
+				iter = i.child
+			default:
+				return nil, fmt.Errorf("failed to apply rowHandler to updateJoin, unknown type: %T", iter)
+			}
+		}
 	default:
 		panic(fmt.Sprintf("Unrecognized RowUpdateType %d", n.RowUpdateType))
 	}

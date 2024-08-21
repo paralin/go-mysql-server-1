@@ -15,7 +15,6 @@
 package planbuilder
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -33,6 +32,7 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 	// TODO: this shouldn't be called during ComPrepare or `PREPARE ... FROM ...` statements, but currently it is.
 	//   The end result is that the ComDelete counter is incremented during prepare statements, which is incorrect.
 	sql.IncrementStatusVariable(b.ctx, "Com_insert", 1)
+	b.qFlags.Set(sql.QFlagInsert)
 
 	if i.With != nil {
 		inScope = b.buildWith(inScope, i.With)
@@ -85,22 +85,53 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 	if rt != nil {
 		sch = b.resolveSchemaDefaults(destScope, rt.Schema())
 	}
-	srcScope := b.insertRowsToNode(inScope, i.Rows, columns, i.Table.Name.String(), sch)
 
-	// TODO: on duplicate expressions need to reference both VALUES and
-	//  derived columns equally in ON DUPLICATE UPDATE expressions.
-	combinedScope := inScope.replace()
-	for i, c := range destScope.cols {
-		combinedScope.newColumn(c)
-		if len(srcScope.cols) == len(destScope.cols) {
-			combinedScope.newColumn(srcScope.cols[i])
-		} else {
-			// check for VALUES refs
-			c.table = OnDupValuesPrefix
-			combinedScope.newColumn(c)
+	insertRows := i.Rows
+
+	// We need to give a table name to the scope of the values being inserted. We use the row alias if provided, otherwise go with a default.
+	// If the row alias also provided column names, we create a map from the destination names to the aliases. This will allow us to
+	// rewrite VALUES() function expressions to use the new column names.
+	inScope.insertTableAlias = OnDupValuesPrefix
+	if aliasedValues, ok := insertRows.(*ast.AliasedValues); ok {
+		valueTableName := aliasedValues.As.String()
+		if valueTableName != "" {
+			inScope.insertTableAlias = valueTableName
+		}
+		if len(aliasedValues.Columns) > 0 {
+			inScope.insertColumnAliases = make(map[string]string)
+			for i, destColumn := range columns {
+				sourceColumn := aliasedValues.Columns[i].Lowered()
+				inScope.insertColumnAliases[destColumn] = sourceColumn
+			}
 		}
 	}
-	onDupExprs := b.buildOnDupUpdateExprs(combinedScope, destScope, ast.AssignmentExprs(i.OnDup))
+
+	srcScope, srcLiteralOnly := b.insertRowsToNode(inScope, insertRows, columns, i.Table.Name.String(), sch)
+
+	var onDupExprs []sql.Expression
+	if len(i.OnDup) > 0 {
+		// TODO: on duplicate expressions need to reference both VALUES and
+		//  derived columns equally in ON DUPLICATE UPDATE expressions.
+		combinedScope := inScope.replace()
+		combinedScope.insertTableAlias = inScope.insertTableAlias
+		combinedScope.insertColumnAliases = inScope.insertColumnAliases
+		for i, c := range destScope.cols {
+			combinedScope.newColumn(c)
+			if len(srcScope.cols) == len(destScope.cols) {
+				combinedScope.newColumn(srcScope.cols[i])
+			} else {
+				// The to-be-inserted values can be referenced via the provided alias.
+				c.table = combinedScope.insertTableAlias
+				if len(combinedScope.insertColumnAliases) > 0 {
+					aliasColumnName := combinedScope.insertColumnAliases[c.col]
+					c.col = aliasColumnName
+					c.originalCol = aliasColumnName
+				}
+				combinedScope.newColumn(c)
+			}
+		}
+		onDupExprs = b.buildOnDupUpdateExprs(combinedScope, destScope, ast.AssignmentExprs(i.OnDup))
+	}
 
 	ignore := false
 	// TODO: make this a bool in vitess
@@ -111,6 +142,7 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 	dest := destScope.node
 
 	ins := plan.NewInsertInto(db, plan.NewInsertDestination(sch, dest), srcScope.node, isReplace, columns, onDupExprs, ignore)
+	ins.LiteralValueSource = srcLiteralOnly
 
 	b.validateInsert(ins)
 
@@ -124,12 +156,12 @@ func (b *Builder) buildInsert(inScope *scope, i *ast.Insert) (outScope *scope) {
 	return
 }
 
-func (b *Builder) insertRowsToNode(inScope *scope, ir ast.InsertRows, columnNames []string, tableName string, destSchema sql.Schema) (outScope *scope) {
+func (b *Builder) insertRowsToNode(inScope *scope, ir ast.InsertRows, columnNames []string, tableName string, destSchema sql.Schema) (outScope *scope, literalOnly bool) {
 	switch v := ir.(type) {
 	case ast.SelectStatement:
-		return b.buildSelectStmt(inScope, v)
+		outScope = b.buildSelectStmt(inScope, v)
 	case *ast.AliasedValues:
-		outScope = b.buildInsertValues(inScope, v, columnNames, tableName, destSchema)
+		outScope, literalOnly = b.buildInsertValues(inScope, v, columnNames, tableName, destSchema)
 	default:
 		err := sql.ErrUnsupportedSyntax.New(ast.String(ir))
 		b.handleErr(err)
@@ -137,7 +169,7 @@ func (b *Builder) insertRowsToNode(inScope *scope, ir ast.InsertRows, columnName
 	return
 }
 
-func (b *Builder) buildInsertValues(inScope *scope, v *ast.AliasedValues, columnNames []string, tableName string, destSchema sql.Schema) (outScope *scope) {
+func (b *Builder) buildInsertValues(inScope *scope, v *ast.AliasedValues, columnNames []string, tableName string, destSchema sql.Schema) (outScope *scope, literalOnly bool) {
 	columnDefaultValues := make([]*sql.ColumnDefaultValue, len(columnNames))
 
 	for i, columnName := range columnNames {
@@ -164,12 +196,10 @@ func (b *Builder) buildInsertValues(inScope *scope, v *ast.AliasedValues, column
 					b.handleErr(err)
 				}
 			}
-
-			err := errors.New("insert row aliases are not currently supported; use the VALUES() function instead")
-			b.handleErr(err)
 		}
 	}
 
+	literalOnly = true
 	exprTuples := make([][]sql.Expression, len(v.Values))
 	for i, vt := range v.Values {
 		// noExprs is an edge case where we fill VALUES with nil expressions
@@ -208,13 +238,14 @@ func (b *Builder) buildInsertValues(inScope *scope, v *ast.AliasedValues, column
 					exprs[j] = b.buildScalar(inScope, e)
 				}
 			default:
+				literalOnly = false
 				exprs[j] = b.buildScalar(inScope, e)
 			}
 		}
 	}
 
 	outScope = inScope.push()
-	outScope.node = plan.NewValues(exprTuples)
+	outScope.node = plan.NewValuesWithAlias(v.As.String(), inScope.insertColumnAliases, exprTuples)
 	return
 }
 
@@ -229,22 +260,6 @@ func reorderSchema(names []string, schema sql.Schema) sql.Schema {
 		newSch[i] = schema[schema.IndexOfColName(name)]
 	}
 	return newSch
-}
-
-func (b *Builder) buildValues(inScope *scope, v ast.AliasedValues) (outScope *scope) {
-	// TODO add literals to outScope?
-	exprTuples := make([][]sql.Expression, len(v.Values))
-	for i, vt := range v.Values {
-		exprs := make([]sql.Expression, len(vt))
-		exprTuples[i] = exprs
-		for j, e := range vt {
-			exprs[j] = b.buildScalar(inScope, e)
-		}
-	}
-
-	outScope = inScope.push()
-	outScope.node = plan.NewValues(exprTuples)
-	return
 }
 
 func (b *Builder) assignmentExprsToExpressions(inScope *scope, e ast.AssignmentExprs) []sql.Expression {
@@ -412,6 +427,7 @@ func (b *Builder) buildDelete(inScope *scope, d *ast.Delete) (outScope *scope) {
 	// TODO: this shouldn't be called during ComPrepare or `PREPARE ... FROM ...` statements, but currently it is.
 	//   The end result is that the ComDelete counter is incremented during prepare statements, which is incorrect.
 	sql.IncrementStatusVariable(b.ctx, "Com_delete", 1)
+	b.qFlags.Set(sql.QFlagDelete)
 
 	outScope = b.buildFrom(inScope, d.TableExprs)
 	b.buildWhere(outScope, d.Where)
@@ -456,6 +472,8 @@ func (b *Builder) buildDelete(inScope *scope, d *ast.Delete) (outScope *scope) {
 	}
 
 	del := plan.NewDeleteFrom(outScope.node, targets)
+	del.RefsSingleRel = !outScope.refsSubquery
+	del.IsProcNested = b.ProcCtx().DbName != ""
 	outScope.node = del
 	return
 }
@@ -464,8 +482,11 @@ func (b *Builder) buildUpdate(inScope *scope, u *ast.Update) (outScope *scope) {
 	// TODO: this shouldn't be called during ComPrepare or `PREPARE ... FROM ...` statements, but currently it is.
 	//   The end result is that the ComDelete counter is incremented during prepare statements, which is incorrect.
 	sql.IncrementStatusVariable(b.ctx, "Com_update", 1)
+	b.qFlags.Set(sql.QFlagUpdate)
 
 	outScope = b.buildFrom(inScope, u.TableExprs)
+
+	_, foundJoin := outScope.node.(*plan.JoinNode)
 
 	// default expressions only resolve to target table
 	updateExprs := b.assignmentExprsToExpressions(outScope, u.Exprs)
@@ -494,8 +515,15 @@ func (b *Builder) buildUpdate(inScope *scope, u *ast.Update) (outScope *scope) {
 	ignore := u.Ignore != ""
 	update := plan.NewUpdate(outScope.node, ignore, updateExprs)
 
+	update.IsJoin = foundJoin
+	update.HasSingleRel = !outScope.refsSubquery
+	update.IsProcNested = b.ProcCtx().DbName != ""
+
 	var checks []*sql.CheckConstraint
 	if join, ok := outScope.node.(*plan.JoinNode); ok {
+		// TODO this doesn't work, a lot of the time the top node
+		// is a filter. This would have to go before we build the
+		// filter/accessory nodes. But that errors for a lot of queries.
 		source := plan.NewUpdateSource(
 			join,
 			ignore,
@@ -550,7 +578,7 @@ func rowUpdatersByTable(ctx *sql.Context, node sql.Node, ij sql.Node) (map[strin
 
 	rowUpdatersByTable := make(map[string]sql.RowUpdater)
 	for tableToBeUpdated, _ := range namesOfTableToBeUpdated {
-		resolvedTable, ok := resolvedTables[tableToBeUpdated]
+		resolvedTable, ok := resolvedTables[strings.ToLower(tableToBeUpdated)]
 		if !ok {
 			return nil, plan.ErrUpdateForTableNotSupported.New(tableToBeUpdated)
 		}
@@ -581,16 +609,16 @@ func getTablesByName(node sql.Node) map[string]*plan.ResolvedTable {
 	transform.Inspect(node, func(node sql.Node) bool {
 		switch n := node.(type) {
 		case *plan.ResolvedTable:
-			ret[n.Table.Name()] = n
+			ret[strings.ToLower(n.Table.Name())] = n
 		case *plan.IndexedTableAccess:
 			rt, ok := n.TableNode.(*plan.ResolvedTable)
 			if ok {
-				ret[rt.Name()] = rt
+				ret[strings.ToLower(rt.Name())] = rt
 			}
 		case *plan.TableAlias:
 			rt := getResolvedTable(n)
 			if rt != nil {
-				ret[n.Name()] = rt
+				ret[strings.ToLower(n.Name())] = rt
 			}
 		default:
 		}
@@ -727,8 +755,7 @@ func (b *Builder) loadChecksFromTable(inScope *scope, table sql.Table) []*sql.Ch
 }
 
 func (b *Builder) buildCheckConstraint(inScope *scope, check *sql.CheckDefinition) *sql.CheckConstraint {
-	parseStr := fmt.Sprintf("select %s", check.CheckExpression)
-	parsed, err := ast.Parse(parseStr)
+	parsed, err := b.parser.ParseSimple(fmt.Sprintf("select %s", check.CheckExpression))
 	if err != nil {
 		b.handleErr(err)
 	}

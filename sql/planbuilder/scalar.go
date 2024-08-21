@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dolthub/vitess/go/vt/proto/query"
 	ast "github.com/dolthub/vitess/go/vt/sqlparser"
 
 	"github.com/dolthub/go-mysql-server/sql"
@@ -31,6 +32,8 @@ import (
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/types"
 )
+
+var icuVersion = "73.1"
 
 func (b *Builder) buildWhere(inScope *scope, where *ast.Where) {
 	if where == nil {
@@ -92,6 +95,8 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		return b.buildIsExprToExpression(inScope, v)
 	case *ast.NotExpr:
 		c := b.buildScalar(inScope, v.Expr)
+		b.qFlags.Set(sql.QFlgNotExpr)
+
 		return expression.NewNot(c)
 	case *ast.SQLVal:
 		return b.ConvertVal(v)
@@ -129,8 +134,11 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		return c.scalarGf()
 	case *ast.FuncExpr:
 		name := v.Name.Lowered()
-
-		if isAggregateFunc(name) && v.Over == nil {
+		if name == "name_const" {
+			return b.buildNameConst(inScope, v)
+		} else if name == "icu_version" {
+			return expression.NewLiteral(icuVersion, types.MustCreateString(query.Type_VARCHAR, int64(len(icuVersion)), sql.Collation_Default))
+		} else if isAggregateFunc(name) && v.Over == nil {
 			// TODO this assumes aggregate is in the same scope
 			// also need to avoid nested aggregates
 			return b.buildAggregateFunc(inScope, name, v)
@@ -138,8 +146,10 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 			return b.buildWindowFunc(inScope, name, v, (*ast.WindowDef)(v.Over))
 		}
 
-		f, err := b.cat.Function(b.ctx, name)
-		if err != nil {
+		f, ok := b.cat.Function(b.ctx, name)
+		if !ok {
+			// todo(max): similar names in registry?
+			err := sql.ErrFunctionNotFound.New(name)
 			b.handleErr(err)
 		}
 
@@ -173,7 +183,6 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		}
 
 		return rf
-
 	case *ast.GroupConcatExpr:
 		// TODO this is an aggregation
 		return b.buildGroupConcat(inScope, v)
@@ -250,6 +259,7 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		expr, err := v.Expression.WithResolvedChildren(resolvedChildren)
 		if err != nil {
 			b.handleErr(err)
+			return nil
 		}
 		if sqlExpr, ok := expr.(sql.Expression); ok {
 			return sqlExpr
@@ -265,6 +275,7 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		case ast.BetweenStr:
 			return expression.NewBetween(val, lower, upper)
 		case ast.NotBetweenStr:
+			b.qFlags.Set(sql.QFlgNotExpr)
 			return expression.NewNot(expression.NewBetween(val, lower, upper))
 		default:
 			return nil
@@ -276,17 +287,18 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 			exprs[i] = expr
 		}
 		return expression.NewTuple(exprs...)
-
 	case *ast.BinaryExpr:
 		return b.buildBinaryScalar(inScope, v)
 	case *ast.UnaryExpr:
 		return b.buildUnaryScalar(inScope, v)
 	case *ast.Subquery:
 		sqScope := inScope.pushSubquery()
+		inScope.refsSubquery = true
 		selectString := ast.String(v.Select)
 		selScope := b.buildSelectStmt(sqScope, v.Select)
 		// TODO: get the original select statement, not the reconstruction
 		sq := plan.NewSubquery(selScope.node, selectString)
+		b.qFlags.Set(sql.QFlagScalarSubquery)
 		sq = sq.WithCorrelated(sqScope.correlated())
 		if b.TriggerCtx().Active {
 			sq = sq.WithVolatile()
@@ -296,6 +308,7 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		return b.buildCaseExpr(inScope, v)
 	case *ast.IntervalExpr:
 		e := b.buildScalar(inScope, v.Expr)
+		b.qFlags.Set(sql.QFlagInterval)
 		return expression.NewInterval(e, v.Unit)
 	case *ast.CollateExpr:
 		// handleCollateExpr is meant to handle generic text-returning expressions that should be reinterpreted as a different collation.
@@ -314,7 +327,10 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 	case *ast.ValuesFuncExpr:
 		if b.insertActive {
 			if v.Name.Qualifier.Name.String() == "" {
-				v.Name.Qualifier.Name = ast.NewTableIdent(OnDupValuesPrefix)
+				v.Name.Qualifier.Name = ast.NewTableIdent(inScope.insertTableAlias)
+				if len(inScope.insertColumnAliases) > 0 {
+					v.Name.Name = ast.NewColIdent(inScope.insertColumnAliases[v.Name.Name.Lowered()])
+				}
 			}
 			dbName := strings.ToLower(v.Name.Qualifier.DbQualifier.String())
 			tblName := strings.ToLower(v.Name.Qualifier.Name.String())
@@ -327,8 +343,9 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 			return col.scalarGf()
 		} else {
 			col := b.buildScalar(inScope, v.Name)
-			fn, err := b.cat.Function(b.ctx, "values")
-			if err != nil {
+			fn, ok := b.cat.Function(b.ctx, "values")
+			if !ok {
+				err := sql.ErrFunctionNotFound.New("values")
 				b.handleErr(err)
 			}
 			values, err := fn.NewInstance([]sql.Expression{col})
@@ -344,6 +361,7 @@ func (b *Builder) buildScalar(inScope *scope, e ast.Expr) (ex sql.Expression) {
 		selectString := ast.String(v.Subquery.Select)
 		sq := plan.NewSubquery(selScope.node, selectString)
 		sq = sq.WithCorrelated(sqScope.correlated())
+		b.qFlags.Set(sql.QFlagScalarSubquery)
 		return plan.NewExistsSubquery(sq)
 	case *ast.TimestampFuncExpr:
 		var (
@@ -426,6 +444,7 @@ func (b *Builder) buildUnaryScalar(inScope *scope, e *ast.UnaryExpr) sql.Express
 		return b.buildScalar(inScope, e.Expr)
 	case ast.BangStr:
 		c := b.buildScalar(inScope, e.Expr)
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(c)
 	case ast.BinaryStr:
 		c := b.buildScalar(inScope, e.Expr)
@@ -502,9 +521,63 @@ func (b *Builder) buildBinaryScalar(inScope *scope, be *ast.BinaryExpr) sql.Expr
 	return expr
 }
 
+// typeExpandComparisonLiteral expands comparison literals to column types
+// to simplify comparison execution when the conversion is safe.
+func (b *Builder) typeExpandComparisonLiteral(left, right sql.Expression) (sql.Expression, sql.Expression) {
+	var leftLit, rightLit *expression.Literal
+	var leftGf, rightGf *expression.GetField
+	switch l := left.(type) {
+	case *expression.GetField:
+		leftGf = l
+	case *expression.Literal:
+		leftLit = l
+	}
+	switch r := right.(type) {
+	case *expression.GetField:
+		rightGf = r
+	case *expression.Literal:
+		rightLit = r
+	}
+
+	var swap bool
+	if leftLit != nil && rightGf != nil {
+		// format: col = lit
+		swap = true
+		left, right = right, left
+		rightLit, leftGf = leftLit, rightGf
+	}
+
+	if leftGf != nil && rightLit != nil {
+		if types.IsSigned(left.Type()) && types.IsSigned(right.Type()) ||
+			types.IsUnsigned(left.Type()) && types.IsUnsigned(right.Type()) ||
+			types.IsFloat(left.Type()) && types.IsFloat(right.Type()) ||
+			types.IsDecimal(left.Type()) && types.IsDecimal(right.Type()) ||
+			types.IsText(left.Type()) && types.IsText(right.Type()) {
+			if left.Type().MaxTextResponseByteLength(b.ctx) >= right.Type().MaxTextResponseByteLength(b.ctx) {
+				// The types are congruent and the literal does not lose
+				// information casting to the column type. The conditions
+				// should preclude out of range, casting errors, or
+				// correctness missteps.
+				val, _, err := leftGf.Type().Convert(rightLit.Value())
+				if err != nil && !expression.ErrNilOperand.Is(err) {
+					b.handleErr(err)
+				}
+				right = expression.NewLiteral(val, leftGf.Type())
+			}
+		}
+
+	}
+	if swap {
+		return right, left
+	}
+	return left, right
+}
+
 func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Expression {
 	left := b.buildScalar(inScope, c.Left)
 	right := b.buildScalar(inScope, c.Right)
+
+	left, right = b.typeExpandComparisonLiteral(left, right)
 
 	var escape sql.Expression = nil
 	if c.Escape != nil {
@@ -513,9 +586,18 @@ func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Exp
 
 	switch strings.ToLower(c.Operator) {
 	case ast.RegexpStr:
-		return expression.NewRegexp(left, right)
+		regexpLike, err := function.NewRegexpLike(left, right)
+		if err != nil {
+			b.handleErr(err)
+		}
+		return regexpLike
 	case ast.NotRegexpStr:
-		return expression.NewNot(expression.NewRegexp(left, right))
+		regexpLike, err := function.NewRegexpLike(left, right)
+		if err != nil {
+			b.handleErr(err)
+		}
+		b.qFlags.Set(sql.QFlgNotExpr)
+		return expression.NewNot(regexpLike)
 	case ast.EqualStr:
 		return expression.NewEquals(left, right)
 	case ast.LessThanStr:
@@ -529,6 +611,7 @@ func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Exp
 	case ast.NullSafeEqualStr:
 		return expression.NewNullSafeEquals(left, right)
 	case ast.NotEqualStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(
 			expression.NewEquals(left, right),
 		)
@@ -537,16 +620,20 @@ func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Exp
 		case expression.Tuple:
 			return expression.NewInTuple(left, right)
 		case *plan.Subquery:
+			b.qFlags.Set(sql.QFlagScalarSubquery)
 			return plan.NewInSubquery(left, right)
 		default:
 			err := sql.ErrUnsupportedFeature.New(fmt.Sprintf("IN %T", right))
 			b.handleErr(err)
 		}
 	case ast.NotInStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		switch right.(type) {
 		case expression.Tuple:
+			b.qFlags.Set(sql.QFlgNotExpr)
 			return expression.NewNotInTuple(left, right)
 		case *plan.Subquery:
+			b.qFlags.Set(sql.QFlagScalarSubquery)
 			return plan.NewNotInSubquery(left, right)
 		default:
 			err := sql.ErrUnsupportedFeature.New(fmt.Sprintf("NOT IN %T", right))
@@ -555,6 +642,7 @@ func (b *Builder) buildComparison(inScope *scope, c *ast.ComparisonExpr) sql.Exp
 	case ast.LikeStr:
 		return expression.NewLike(left, right, escape)
 	case ast.NotLikeStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(expression.NewLike(left, right, escape))
 	default:
 		err := sql.ErrUnsupportedFeature.New(c.Operator)
@@ -589,14 +677,17 @@ func (b *Builder) buildIsExprToExpression(inScope *scope, c *ast.IsExpr) sql.Exp
 	case ast.IsNullStr:
 		return expression.NewIsNull(e)
 	case ast.IsNotNullStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(expression.NewIsNull(e))
 	case ast.IsTrueStr:
 		return expression.NewIsTrue(e)
 	case ast.IsFalseStr:
 		return expression.NewIsFalse(e)
 	case ast.IsNotTrueStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(expression.NewIsTrue(e))
 	case ast.IsNotFalseStr:
+		b.qFlags.Set(sql.QFlgNotExpr)
 		return expression.NewNot(expression.NewIsFalse(e))
 	default:
 		err := sql.ErrUnsupportedSyntax.New(ast.String(c))
@@ -700,6 +791,7 @@ func (b *Builder) caseExprToExpression(inScope *scope, e *ast.CaseExpr) (sql.Exp
 
 func (b *Builder) intervalExprToExpression(inScope *scope, e *ast.IntervalExpr) *expression.Interval {
 	expr := b.buildScalar(inScope, e.Expr)
+	b.qFlags.Set(sql.QFlagInterval)
 	return expression.NewInterval(expr, e.Unit)
 }
 

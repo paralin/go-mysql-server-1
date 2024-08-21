@@ -576,6 +576,14 @@ func (b *BaseBuilder) buildCreateUser(ctx *sql.Context, n *plan.CreateUser, _ sq
 			return nil, sql.ErrUserCreationFailure.New(user.UserName.String("'"))
 		}
 
+		if len(user.UserName.Name) > 32 {
+			return nil, sql.ErrUserNameTooLong.New(user.UserName.Name)
+		}
+
+		if len(user.UserName.Host) > 255 {
+			return nil, sql.ErrUserHostTooLong.New(user.UserName.Host)
+		}
+
 		plugin := "mysql_native_password"
 		password := ""
 		if user.Auth1 != nil {
@@ -996,7 +1004,7 @@ func (b *BaseBuilder) buildCreateTable(ctx *sql.Context, n *plan.CreateTable, ro
 		return sql.RowsToRowIter(), err
 	}
 	if !ok {
-		return sql.RowsToRowIter(), sql.ErrTableCreatedNotFound.New()
+		return sql.RowsToRowIter(), sql.ErrTableCreatedNotFound.New(n.Name())
 	}
 
 	if autoIncVal, hasAutoIncOpt := n.TableOpts["auto_increment"]; hasAutoIncOpt {
@@ -1085,6 +1093,11 @@ func createIndexesForCreateTable(ctx *sql.Context, db sql.Database, tableNode sq
 		}
 
 		err = idxAltTbl.CreateIndex(ctx, *idxDef)
+		if err != nil {
+			return err
+		}
+
+		err = warnOnDuplicateSecondaryIndex(ctx, idxDef.Name, idxAltTbl)
 		if err != nil {
 			return err
 		}

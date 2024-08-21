@@ -15,15 +15,13 @@
 package analyzer
 
 import (
-	"reflect"
-
 	"github.com/dolthub/go-mysql-server/sql"
 	"github.com/dolthub/go-mysql-server/sql/plan"
 	"github.com/dolthub/go-mysql-server/sql/transform"
 )
 
 // RuleFunc is the function to be applied in a rule.
-type RuleFunc func(*sql.Context, *Analyzer, sql.Node, *plan.Scope, RuleSelector) (sql.Node, transform.TreeIdentity, error)
+type RuleFunc func(*sql.Context, *Analyzer, sql.Node, *plan.Scope, RuleSelector, *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error)
 
 // RuleSelector filters analysis rules by id
 type RuleSelector func(RuleId) bool
@@ -51,16 +49,16 @@ type Batch struct {
 // Eval executes the rules of the batch. On any error, the partially transformed node is returned along with the error.
 // If the batch's max number of iterations is reached without achieving stabilization (batch evaluation no longer
 // changes the node), then this method returns ErrMaxAnalysisIters.
-func (b *Batch) Eval(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
-	return b.EvalWithSelector(ctx, a, n, scope, sel)
+func (b *Batch) Eval(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
+	return b.EvalWithSelector(ctx, a, n, scope, sel, qFlags)
 }
 
-func (b *Batch) EvalWithSelector(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func (b *Batch) EvalWithSelector(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	if b.Iterations == 0 {
 		return n, transform.SameTree, nil
 	}
 	a.PushDebugContext("0")
-	cur, _, err := b.evalOnce(ctx, a, n, scope, sel)
+	cur, _, err := b.evalOnce(ctx, a, n, scope, sel, qFlags)
 	a.PopDebugContext()
 	if err != nil {
 		return cur, transform.SameTree, err
@@ -71,7 +69,7 @@ func (b *Batch) EvalWithSelector(ctx *sql.Context, a *Analyzer, n sql.Node, scop
 // evalOnce returns the result of evaluating a batch of rules on the node given. In the result of an error, the result
 // of the last successful transformation is returned along with the error. If no transformation was successful, the
 // input node is returned as-is.
-func (b *Batch) evalOnce(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector) (sql.Node, transform.TreeIdentity, error) {
+func (b *Batch) evalOnce(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.Scope, sel RuleSelector, qFlags *sql.QueryFlags) (sql.Node, transform.TreeIdentity, error) {
 	var (
 		same    = transform.SameTree
 		allSame = transform.SameTree
@@ -86,7 +84,7 @@ func (b *Batch) evalOnce(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 		var err error
 		a.Log("Evaluating rule %s", rule.Id)
 		a.PushDebugContext(rule.Id.String())
-		next, same, err = rule.Apply(ctx, a, prev, scope, sel)
+		next, same, err = rule.Apply(ctx, a, prev, scope, sel, qFlags)
 		allSame = same && allSame
 		if next != nil && !same {
 			a.LogNode(next)
@@ -105,20 +103,4 @@ func (b *Batch) evalOnce(ctx *sql.Context, a *Analyzer, n sql.Node, scope *plan.
 	}
 
 	return prev, allSame, nil
-}
-
-func nodesEqual(a, b sql.Node) bool {
-	if e, ok := a.(equaler); ok {
-		return e.Equal(b)
-	}
-
-	if e, ok := b.(equaler); ok {
-		return e.Equal(a)
-	}
-
-	return reflect.DeepEqual(a, b)
-}
-
-type equaler interface {
-	Equal(sql.Node) bool
 }

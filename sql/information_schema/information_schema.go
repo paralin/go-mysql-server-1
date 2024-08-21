@@ -149,11 +149,11 @@ type informationSchemaDatabase struct {
 	tables map[string]Table
 }
 
-type informationSchemaTable struct {
-	name    string
-	schema  Schema
-	catalog Catalog
-	reader  func(*Context, Catalog) (RowIter, error)
+type InformationSchemaTable struct {
+	TableName   string
+	TableSchema Schema
+	catalog     Catalog
+	Reader      func(*Context, Catalog) (RowIter, error)
 }
 
 type informationSchemaPartition struct {
@@ -167,9 +167,9 @@ type informationSchemaPartitionIter struct {
 
 var (
 	_ Database        = (*informationSchemaDatabase)(nil)
-	_ Table           = (*informationSchemaTable)(nil)
-	_ StatisticsTable = (*informationSchemaTable)(nil)
-	_ Databaseable    = (*informationSchemaTable)(nil)
+	_ Table           = (*InformationSchemaTable)(nil)
+	_ StatisticsTable = (*InformationSchemaTable)(nil)
+	_ Databaseable    = (*InformationSchemaTable)(nil)
 	_ Partition       = (*informationSchemaPartition)(nil)
 	_ PartitionIter   = (*informationSchemaPartitionIter)(nil)
 )
@@ -589,15 +589,6 @@ var schemaPrivilegesSchema = Schema{
 	{Name: "IS_GRANTABLE", Type: types.MustCreateString(sqltypes.VarChar, 3, Collation_Information_Schema_Default), Default: nil, Nullable: false, Source: SchemaPrivilegesTableName},
 }
 
-var schemataSchema = Schema{
-	{Name: "CATALOG_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: SchemataTableName},
-	{Name: "SCHEMA_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: SchemataTableName},
-	{Name: "DEFAULT_CHARACTER_SET_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: false, Source: SchemataTableName},
-	{Name: "DEFAULT_COLLATION_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: false, Source: SchemataTableName},
-	{Name: "SQL_PATH", Type: types.MustCreateBinary(sqltypes.Binary, 0), Default: nil, Nullable: true, Source: SchemataTableName},
-	{Name: "DEFAULT_ENCRYPTION", Type: types.MustCreateEnumType([]string{"NO", "YES"}, Collation_Information_Schema_Default), Default: nil, Nullable: false, Source: SchemataTableName},
-}
-
 var schemataExtensionsSchema = Schema{
 	{Name: "CATALOG_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: SchemataExtensionsTableName},
 	{Name: "SCHEMA_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: SchemataExtensionsTableName},
@@ -771,7 +762,7 @@ var viewRoutineUsageSchema = Schema{
 	{Name: "TABLE_SCHEMA", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: ViewRoutineUsageTableName},
 	{Name: "TABLE_NAME", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: ViewRoutineUsageTableName},
 	{Name: "SPECIFIC_CATALOG", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: ViewRoutineUsageTableName},
-	{Name: "SPECIFIC_CATALOG", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: ViewRoutineUsageTableName},
+	{Name: "SPECIFIC_SCHEMA", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: true, Source: ViewRoutineUsageTableName},
 	{Name: "SPECIFIC_TABLE", Type: types.MustCreateString(sqltypes.VarChar, 64, Collation_Information_Schema_Default), Default: nil, Nullable: false, Source: ViewRoutineUsageTableName},
 }
 
@@ -802,10 +793,10 @@ func characterSetsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
 	for _, c := range SupportedCharsets {
 		rows = append(rows, Row{
-			c.String(),
-			c.DefaultCollation().Name(),
-			c.Description(),
-			uint64(c.MaxLength()),
+			c.String(),                  // character_set_name
+			c.DefaultCollation().Name(), // default_collation_name
+			c.Description(),             // description
+			uint64(c.MaxLength()),       // maxlen
 		})
 	}
 	return RowsToRowIter(rows...), nil
@@ -814,14 +805,20 @@ func characterSetsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // checkConstraintsRowIter implements the sql.RowIter for the information_schema.CHECK_CONSTRAINTS table.
 func checkConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
-		tableNames, err := db.GetTableNames(ctx)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, err := db.Database.GetTableNames(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -834,7 +831,12 @@ func checkConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 				}
 
 				for _, checkDefinition := range checkDefinitions {
-					rows = append(rows, Row{"def", db.Name(), checkDefinition.Name, checkDefinition.CheckExpression})
+					rows = append(rows, Row{
+						db.CatalogName,                  // constraint_catalog
+						db.SchemaName,                   // constraint_schema
+						checkDefinition.Name,            // constraint_name
+						checkDefinition.CheckExpression, // check_clause
+					})
 				}
 			}
 		}
@@ -849,8 +851,8 @@ func collationCharacterSetApplicabilityRowIter(ctx *Context, c Catalog) (RowIter
 	collIter := NewCollationsIterator()
 	for c, ok := collIter.Next(); ok; c, ok = collIter.Next() {
 		rows = append(rows, Row{
-			c.Name,
-			c.CharacterSet.String(),
+			c.Name,                  // collation_name
+			c.CharacterSet.String(), // character_set_name
 		})
 	}
 	return RowsToRowIter(rows...), nil
@@ -862,13 +864,13 @@ func collationsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	collIter := NewCollationsIterator()
 	for c, ok := collIter.Next(); ok; c, ok = collIter.Next() {
 		rows = append(rows, Row{
-			c.Name,
-			c.CharacterSet.Name(),
-			uint64(c.ID),
-			c.ID.IsDefault(),
-			c.ID.IsCompiled(),
-			c.ID.SortLength(),
-			c.ID.PadAttribute(),
+			c.Name,                // collation_name
+			c.CharacterSet.Name(), // character_set_name
+			uint64(c.ID),          // id
+			c.ID.IsDefault(),      // is_default
+			c.ID.IsCompiled(),     // is_compiled
+			c.ID.SortLength(),     // sortlen
+			c.ID.PadAttribute(),   // pad_attribute
 		})
 	}
 	return RowsToRowIter(rows...), nil
@@ -884,11 +886,17 @@ func columnStatisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	if privSet == nil {
 		return RowsToRowIter(rows...), nil
 	}
-	for _, db := range c.AllDatabases(ctx) {
-		dbName := db.Name()
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		dbName := db.Database.Name()
 		privSetDb := privSet.Database(dbName)
 
-		err := DBTableIter(ctx, db, func(t Table) (cont bool, err error) {
+		err := DBTableIter(ctx, db.Database, func(t Table) (cont bool, err error) {
 			privSetTbl := privSetDb.Table(t.Name())
 			tableStats, err := c.GetTableStats(ctx, dbName, t)
 			if err != nil {
@@ -901,10 +909,10 @@ func columnStatisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 					}
 				}
 				rows = append(rows, Row{
-					db.Name(),                          // table_schema
+					db.SchemaName,                      // table_schema
 					t.Name(),                           // table_name
 					strings.Join(stats.Columns(), ","), // column_name
-					stats,
+					stats,                              // histogram
 				})
 			}
 			return true, nil
@@ -920,18 +928,23 @@ func columnStatisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // columnsExtensionsRowIter implements the sql.RowIter for the information_schema.COLUMNS_EXTENSIONS table.
 func columnsExtensionsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range cat.AllDatabases(ctx) {
-		dbName := db.Name()
-		err := DBTableIter(ctx, db, func(t Table) (cont bool, err error) {
+
+	databases, err := AllDatabases(ctx, cat, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		err := DBTableIter(ctx, db.Database, func(t Table) (cont bool, err error) {
 			tblName := t.Name()
 			for _, col := range t.Schema() {
 				rows = append(rows, Row{
-					"def",    // table_catalog
-					dbName,   // table_schema
-					tblName,  // table_name
-					col.Name, // column_name
-					nil,      // engine_attribute // TODO: reserved for future use
-					nil,      // secondary_engine_attribute // TODO: reserved for future use
+					db.CatalogName, // table_catalog
+					db.SchemaName,  // table_schema
+					tblName,        // table_name
+					col.Name,       // column_name
+					nil,            // engine_attribute // TODO: reserved for future use
+					nil,            // secondary_engine_attribute // TODO: reserved for future use
 				})
 			}
 			return true, nil
@@ -948,12 +961,12 @@ func enginesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 	var rows []Row
 	for _, c := range SupportedEngines {
 		rows = append(rows, Row{
-			c.String(),
-			c.Support(),
-			c.Comment(),
-			c.Transactions(),
-			c.XA(),
-			c.Savepoints(),
+			c.String(),       // engine
+			c.Support(),      // support
+			c.Comment(),      // comment
+			c.Transactions(), // transactions
+			c.XA(),           // xa
+			c.Savepoints(),   // savepoints
 		})
 	}
 	return RowsToRowIter(rows...), nil
@@ -969,10 +982,15 @@ func eventsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	}
 	collationConnection, err := ctx.GetSessionVariable(ctx, "collation_connection")
 
-	for _, db := range c.AllDatabases(ctx) {
-		dbCollation := plan.GetDatabaseCollation(ctx, db)
-		dbName := db.Name()
-		eventDb, ok := db.(EventDatabase)
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		dbCollation := plan.GetDatabaseCollation(ctx, db.Database)
+
+		eventDb, ok := db.Database.(EventDatabase)
 		if ok {
 			eventDefs, _, err := eventDb.GetEvents(ctx)
 			if err != nil {
@@ -1023,11 +1041,11 @@ func eventsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 				created := ed.CreatedAt.Format(EventDateSpaceTimeFormat)
 				lastAltered := ed.LastAltered.Format(EventDateSpaceTimeFormat)
 				lastExecuted := ed.LastExecuted.Format(EventDateSpaceTimeFormat)
-				// TODO: timezone should use e.TimezoneOffest, but is always 'SYSTEM' for now.
+				// TODO: timezone should use e.TimezoneOffset, but is always 'SYSTEM' for now.
 
 				rows = append(rows, Row{
-					"def",                // event_catalog
-					dbName,               // event_schema
+					db.CatalogName,       // event_catalog
+					db.SchemaName,        // event_schema
 					ed.Name,              // event_name
 					ed.Definer,           // definer
 					"SYSTEM",             // time_zone
@@ -1061,14 +1079,20 @@ func eventsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // keyColumnUsageRowIter implements the sql.RowIter for the information_schema.KEY_COLUMN_USAGE table.
 func keyColumnUsageRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
-		tableNames, err := db.GetTableNames(ctx)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, err := db.Database.GetTableNames(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1094,7 +1118,20 @@ func keyColumnUsageRowIter(ctx *Context, c Catalog) (RowIter, error) {
 					for i, colName := range colNames {
 						ordinalPosition := i + 1 // Ordinal Positions starts at one
 
-						rows = append(rows, Row{"def", db.Name(), index.ID(), "def", db.Name(), tbl.Name(), colName, ordinalPosition, nil, nil, nil, nil})
+						rows = append(rows, Row{
+							db.CatalogName,  // constraint_catalog
+							db.SchemaName,   // constraint_schema
+							index.ID(),      // constraint_name
+							db.CatalogName,  // table_catalog
+							db.SchemaName,   // table_schema
+							tbl.Name(),      // table_name
+							colName,         // column_name
+							ordinalPosition, // ordinal_position
+							nil,             // position_in_unique_constraint
+							nil,             // referenced_table_schema
+							nil,             // referenced_table_name
+							nil,             // referenced_column_name
+						})
 					}
 				}
 			}
@@ -1115,7 +1152,20 @@ func keyColumnUsageRowIter(ctx *Context, c Catalog) (RowIter, error) {
 						referencedTableName := fk.ParentTable
 						referencedColumnName := strings.Replace(fk.ParentColumns[j], "`", "", -1) // get rid of backticks
 
-						rows = append(rows, Row{"def", db.Name(), fk.Name, "def", db.Name(), tbl.Name(), colName, ordinalPosition, ordinalPosition, referencedSchema, referencedTableName, referencedColumnName})
+						rows = append(rows, Row{
+							db.CatalogName,       // constraint_catalog
+							db.SchemaName,        // constraint_schema
+							fk.Name,              // constraint_name
+							db.CatalogName,       // table_catalog
+							db.SchemaName,        // table_schema
+							tbl.Name(),           // table_name
+							colName,              // column_name
+							ordinalPosition,      // ordinal_position
+							ordinalPosition,      // position_in_unique_constraint
+							referencedSchema,     // referenced_table_schema
+							referencedTableName,  // referenced_table_name
+							referencedColumnName, // referenced_column_name
+						})
 					}
 				}
 			}
@@ -1176,14 +1226,20 @@ func processListRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // referentialConstraintsRowIter implements the sql.RowIter for the information_schema.REFERENTIAL_CONSTRAINTS table.
 func referentialConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
-		tableNames, err := db.GetTableNames(ctx)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, err := db.Database.GetTableNames(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1244,10 +1300,10 @@ func referentialConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 					}
 
 					rows = append(rows, Row{
-						"def",               // constraint_catalog
-						db.Name(),           // constraint_schema
+						db.CatalogName,      // constraint_catalog
+						db.SchemaName,       // constraint_schema
 						fk.Name,             // constraint_name
-						"def",               // unique_constraint_catalog
+						db.CatalogName,      // unique_constraint_catalog
 						referencedSchema,    // unique_constraint_schema
 						uniqueConstName,     // unique_constraint_name
 						"NONE",              // match_option
@@ -1333,40 +1389,26 @@ func schemaPrivilegesRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	return RowsToRowIter(rows...), nil
 }
 
-// schemataRowIter implements the sql.RowIter for the information_schema.SCHEMATA table.
-func schemataRowIter(ctx *Context, c Catalog) (RowIter, error) {
-	dbs := c.AllDatabases(ctx)
-
-	var rows []Row
-	for _, db := range dbs {
-		collation := plan.GetDatabaseCollation(ctx, db)
-		rows = append(rows, Row{
-			"def",                             // catalog_name
-			db.Name(),                         // schema_name
-			collation.CharacterSet().String(), // default_character_set_name
-			collation.String(),                // default_collation_name
-			nil,                               // sql_path
-			"NO",                              // default_encryption
-		})
-	}
-
-	return RowsToRowIter(rows...), nil
-}
-
 // schemataExtensionsRowIter implements the sql.RowIter for the information_schema.SCHEMATA_EXTENSIONS table.
 func schemataExtensionsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
 		var readOnly string
-		if rodb, ok := db.(ReadOnlyDatabase); ok {
+		if rodb, ok := db.Database.(ReadOnlyDatabase); ok {
 			if rodb.IsReadOnly() {
 				readOnly = "READ ONLY=1"
 			}
 		}
 		rows = append(rows, Row{
-			"def",     // catalog_name
-			db.Name(), // schema_name
-			readOnly,  // options
+			db.CatalogName, // catalog_name
+			db.SchemaName,  // schema_name
+			readOnly,       // options
 		})
 	}
 
@@ -1376,10 +1418,14 @@ func schemataExtensionsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // stGeometryColumnsRowIter implements the sql.RowIter for the information_schema.ST_GEOMETRY_COLUMNS table.
 func stGeometryColumnsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range cat.AllDatabases(ctx) {
-		dbName := db.Name()
 
-		err := DBTableIter(ctx, db, func(t Table) (cont bool, err error) {
+	databases, err := AllDatabases(ctx, cat, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		err := DBTableIter(ctx, db.Database, func(t Table) (cont bool, err error) {
 			tblName := t.Name()
 
 			for _, col := range t.Schema() {
@@ -1400,13 +1446,13 @@ func stGeometryColumnsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 				}
 
 				rows = append(rows, Row{
-					"def",    // table_catalog
-					dbName,   // table_schema
-					tblName,  // table_name
-					colName,  // column_name
-					srsName,  // srs_name
-					srsId,    // srs_id
-					typeName, // geometry_type_name
+					db.CatalogName, // table_catalog
+					db.SchemaName,  // table_schema
+					tblName,        // table_name
+					colName,        // column_name
+					srsName,        // srs_name
+					srsId,          // srs_id
+					typeName,       // geometry_type_name
 				})
 			}
 			return true, nil
@@ -1454,16 +1500,20 @@ func stUnitsOfMeasureRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 // statisticsRowIter implements the sql.RowIter for the information_schema.STATISTICS table.
 func statisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	dbs := c.AllDatabases(ctx)
 
-	for _, db := range dbs {
-		tableNames, tErr := db.GetTableNames(ctx)
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, tErr := db.Database.GetTableNames(ctx)
 		if tErr != nil {
 			return nil, tErr
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1529,24 +1579,24 @@ func statisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 							// TODO: we currently don't support expression index such as ((i * 20))
 
 							rows = append(rows, Row{
-								"def",        // table_catalog
-								db.Name(),    // table_schema
-								tbl.Name(),   // table_name
-								nonUnique,    // non_unique		NOT NULL
-								db.Name(),    // index_schema
-								indexName,    // index_name
-								seqInIndex,   // seq_in_index	NOT NULL
-								colName,      // column_name
-								collation,    // collation
-								cardinality,  // cardinality
-								subPart,      // sub_part
-								nil,          // packed
-								nullable,     // is_nullable	NOT NULL
-								indexType,    // index_type		NOT NULL
-								comment,      // comment		NOT NULL
-								indexComment, // index_comment	NOT NULL
-								isVisible,    // is_visible		NOT NULL
-								nil,          // expression
+								db.CatalogName, // table_catalog
+								db.SchemaName,  // table_schema
+								tbl.Name(),     // table_name
+								nonUnique,      // non_unique		NOT NULL
+								db.SchemaName,  // index_schema
+								indexName,      // index_name
+								seqInIndex,     // seq_in_index	NOT NULL
+								colName,        // column_name
+								collation,      // collation
+								cardinality,    // cardinality
+								subPart,        // sub_part
+								nil,            // packed
+								nullable,       // is_nullable	NOT NULL
+								indexType,      // index_type		NOT NULL
+								comment,        // comment		NOT NULL
+								indexComment,   // index_comment	NOT NULL
+								isVisible,      // is_visible		NOT NULL
+								nil,            // expression
 							})
 						}
 					}
@@ -1561,14 +1611,20 @@ func statisticsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // tableConstraintsRowIter implements the sql.RowIter for the information_schema.TABLE_CONSTRAINTS table.
 func tableConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
-		tableNames, err := db.GetTableNames(ctx)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, err := db.Database.GetTableNames(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1586,7 +1642,15 @@ func tableConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 					if !checkDefinition.Enforced {
 						enforced = "NO"
 					}
-					rows = append(rows, Row{"def", db.Name(), checkDefinition.Name, db.Name(), tbl.Name(), "CHECK", enforced})
+					rows = append(rows, Row{
+						db.CatalogName,       // constraint_catalog
+						db.SchemaName,        // constraint_schema
+						checkDefinition.Name, // constraint_name
+						db.SchemaName,        // table_schema
+						tbl.Name(),           // table_name
+						"CHECK",              // constraint_type
+						enforced,             // enforced
+					})
 				}
 			}
 
@@ -1611,7 +1675,15 @@ func tableConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 
 					}
 
-					rows = append(rows, Row{"def", db.Name(), index.ID(), db.Name(), tbl.Name(), outputType, "YES"})
+					rows = append(rows, Row{
+						db.CatalogName, // constraint_catalog
+						db.SchemaName,  // constraint_schema
+						index.ID(),     // constraint_name
+						db.SchemaName,  // table_schema
+						tbl.Name(),     // table_name
+						outputType,     // constraint_type
+						"YES",          // enforced
+					})
 				}
 			}
 
@@ -1624,7 +1696,15 @@ func tableConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 				}
 
 				for _, fk := range fks {
-					rows = append(rows, Row{"def", db.Name(), fk.Name, db.Name(), tbl.Name(), "FOREIGN KEY", "YES"})
+					rows = append(rows, Row{
+						db.CatalogName, // constraint_catalog
+						db.SchemaName,  // constraint_schema
+						fk.Name,        // constraint_name
+						db.SchemaName,  // table_schema
+						tbl.Name(),     // table_name
+						"FOREIGN KEY",  // constraint_type
+						"YES",          // enforced
+					})
 				}
 			}
 		}
@@ -1636,15 +1716,20 @@ func tableConstraintsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 // tableConstraintsExtensionsRowIter implements the sql.RowIter for the information_schema.TABLE_CONSTRAINTS_EXTENSIONS table.
 func tableConstraintsExtensionsRowIter(ctx *Context, c Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range c.AllDatabases(ctx) {
-		dbName := db.Name()
-		tableNames, err := db.GetTableNames(ctx)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		tableNames, err := db.Database.GetTableNames(ctx)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, tableName := range tableNames {
-			tbl, _, err := c.DatabaseTable(ctx, db, tableName)
+			tbl, _, err := c.DatabaseTable(ctx, db.Database, tableName)
 			if err != nil {
 				return nil, err
 			}
@@ -1661,12 +1746,12 @@ func tableConstraintsExtensionsRowIter(ctx *Context, c Catalog) (RowIter, error)
 
 				for _, index := range indexes {
 					rows = append(rows, Row{
-						"def",
-						dbName,
-						index.ID(),
-						tblName,
-						nil,
-						nil,
+						db.CatalogName, // constraint_catalog
+						db.SchemaName,  // constraint_schema
+						index.ID(),     // constraint_name
+						tblName,        // table_name
+						nil,            // engine_attribute
+						nil,            // secondary_engine_attribute
 					})
 				}
 			}
@@ -1810,8 +1895,13 @@ func tablesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 		autoInc        interface{}
 	)
 
-	for _, db := range cat.AllDatabases(ctx) {
-		if db.Name() == InformationSchemaDatabaseName {
+	databases, err := AllDatabases(ctx, cat, true)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		if db.Database.Name() == InformationSchemaDatabaseName {
 			tableType = "SYSTEM VIEW"
 		} else {
 			tableType = "BASE TABLE"
@@ -1820,10 +1910,10 @@ func tablesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 		}
 
 		y2k, _, _ := types.Timestamp.Convert("2000-01-01 00:00:00")
-		err := DBTableIter(ctx, db, func(t Table) (cont bool, err error) {
+		err := DBTableIter(ctx, db.Database, func(t Table) (cont bool, err error) {
 			tableCollation = t.Collation().String()
 			comment := ""
-			if db.Name() != InformationSchemaDatabaseName {
+			if db.Database.Name() != InformationSchemaDatabaseName {
 				if st, ok := t.(StatisticsTable); ok {
 					tableRows, _, err = st.RowCount(ctx)
 					if err != nil {
@@ -1864,8 +1954,8 @@ func tablesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 			}
 
 			rows = append(rows, Row{
-				"def",          // table_catalog
-				db.Name(),      // table_schema
+				db.CatalogName, // table_catalog
+				db.SchemaName,  // table_schema
 				t.Name(),       // table_name
 				tableType,      // table_type
 				engine,         // engine
@@ -1894,34 +1984,34 @@ func tablesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 			return nil, err
 		}
 
-		views, err := viewsInDatabase(ctx, db)
+		views, err := ViewsInDatabase(ctx, db.Database)
 		if err != nil {
 			return nil, err
 		}
 
 		for _, view := range views {
 			rows = append(rows, Row{
-				"def",     // table_catalog
-				db.Name(), // table_schema
-				view.Name, // table_name
-				"VIEW",    // table_type
-				nil,       // engine
-				nil,       // version (protocol, always 10)
-				nil,       // row_format
-				nil,       // table_rows
-				nil,       // avg_row_length
-				nil,       // data_length
-				nil,       // max_data_length
-				nil,       // max_data_length
-				nil,       // data_free
-				nil,       // auto_increment
-				y2k,       // create_time
-				nil,       // update_time
-				nil,       // check_time
-				nil,       // table_collation
-				nil,       // checksum
-				nil,       // create_options
-				"VIEW",    // table_comment
+				db.CatalogName, // table_catalog
+				db.SchemaName,  // table_schema
+				view.Name,      // table_name
+				"VIEW",         // table_type
+				nil,            // engine
+				nil,            // version (protocol, always 10)
+				nil,            // row_format
+				nil,            // table_rows
+				nil,            // avg_row_length
+				nil,            // data_length
+				nil,            // max_data_length
+				nil,            // max_data_length
+				nil,            // data_free
+				nil,            // auto_increment
+				y2k,            // create_time
+				nil,            // update_time
+				nil,            // check_time
+				nil,            // table_collation
+				nil,            // checksum
+				nil,            // create_options
+				"VIEW",         // table_comment
 			})
 		}
 	}
@@ -1929,18 +2019,77 @@ func tablesRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 	return RowsToRowIter(rows...), nil
 }
 
+// DbWithNames includes the Database with the catalog and schema names.
+type DbWithNames struct {
+	Database    Database
+	CatalogName string
+	SchemaName  string
+}
+
+// AllDatabases expands all databases in the catalog to include all schemas if
+// present. For Postgres, it will only return the schemas for the current database.
+func AllDatabases(ctx *Context, cat Catalog, privCheck bool) ([]DbWithNames, error) {
+	var dbs []DbWithNames
+
+	currentDB := ctx.GetCurrentDatabase()
+
+	for _, db := range cat.AllDatabases(ctx) {
+		if privCheck {
+			if privDatabase, ok := db.(mysql_db.PrivilegedDatabase); ok {
+				db = privDatabase.Unwrap()
+			}
+		}
+
+		sdb, ok := db.(SchemaDatabase)
+		if ok {
+			var schemaDbs []DbWithNames
+			schemas, err := sdb.AllSchemas(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, schema := range schemas {
+				if schema.SchemaName() != "" && db.Name() == currentDB {
+					schemaDbs = append(schemaDbs, DbWithNames{schema, schema.Name(), schema.SchemaName()})
+				} else {
+					dbs = append(dbs, DbWithNames{schema, "def", schema.Name()})
+				}
+			}
+
+			if len(schemaDbs) > 0 {
+				// TODO: information_schema should be included in the schema list
+				infoSchemaDB, err := cat.Database(ctx, InformationSchemaDatabaseName)
+				if err != nil {
+					return nil, err
+				}
+				schemaDbs = append(schemaDbs, DbWithNames{infoSchemaDB, sdb.Name(), InformationSchemaDatabaseName})
+
+				return schemaDbs, nil
+			}
+		} else {
+			dbs = append(dbs, DbWithNames{db, "def", db.Name()})
+		}
+	}
+	return dbs, nil
+}
+
 // tablesExtensionsRowIter implements the sql.RowIter for the information_schema.TABLES_EXTENSIONS table.
 func tablesExtensionsRowIter(ctx *Context, cat Catalog) (RowIter, error) {
 	var rows []Row
-	for _, db := range cat.AllDatabases(ctx) {
-		dbName := db.Name()
-		err := DBTableIter(ctx, db, func(t Table) (cont bool, err error) {
+
+	databases, err := AllDatabases(ctx, cat, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		err := DBTableIter(ctx, db.Database, func(t Table) (cont bool, err error) {
 			rows = append(rows, Row{
-				"def",    // table_catalog
-				dbName,   // table_schema
-				t.Name(), // table_name
-				nil,      // engine_attribute // TODO: reserved for future use
-				nil,      // secondary_engine_attribute // TODO: reserved for future use
+				db.CatalogName, // table_catalog
+				db.SchemaName,  // table_schema
+				t.Name(),       // table_name
+				nil,            // engine_attribute // TODO: reserved for future use
+				nil,            // secondary_engine_attribute // TODO: reserved for future use
 			})
 			return true, nil
 		})
@@ -1968,11 +2117,17 @@ func triggersRowIter(ctx *Context, c Catalog) (RowIter, error) {
 		return RowsToRowIter(rows...), nil
 	}
 	hasGlobalTriggerPriv := privSet.Has(PrivilegeType_Trigger)
-	for _, db := range c.AllDatabases(ctx) {
-		dbCollation := plan.GetDatabaseCollation(ctx, db)
-		triggerDb, ok := db.(TriggerDatabase)
+
+	databases, err := AllDatabases(ctx, c, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		dbCollation := plan.GetDatabaseCollation(ctx, db.Database)
+		triggerDb, ok := db.Database.(TriggerDatabase)
 		if ok {
-			privDbSet := privSet.Database(db.Name())
+			privDbSet := privSet.Database(db.Database.Name())
 			hasDbTriggerPriv := privDbSet.Has(PrivilegeType_Trigger)
 			triggers, err := triggerDb.GetTriggers(ctx)
 			if err != nil {
@@ -1986,7 +2141,7 @@ func triggersRowIter(ctx *Context, c Catalog) (RowIter, error) {
 			var triggerPlans []*plan.CreateTrigger
 			for _, trigger := range triggers {
 				triggerSqlMode := NewSqlModeFromString(trigger.SqlMode)
-				parsedTrigger, err := planbuilder.ParseWithOptions(ctx, c, trigger.CreateStatement, triggerSqlMode.ParserOptions())
+				parsedTrigger, _, err := planbuilder.ParseWithOptions(ctx, c, trigger.CreateStatement, triggerSqlMode.ParserOptions())
 				if err != nil {
 					return nil, err
 				}
@@ -2042,12 +2197,12 @@ func triggersRowIter(ctx *Context, c Catalog) (RowIter, error) {
 					// To see information about a table's triggers, you must have the TRIGGER privilege for the table.
 					if hasGlobalTriggerPriv || hasDbTriggerPriv || privTblSet.Has(PrivilegeType_Trigger) {
 						rows = append(rows, Row{
-							"def",                   // trigger_catalog
-							triggerDb.Name(),        // trigger_schema
+							db.CatalogName,          // trigger_catalog
+							db.SchemaName,           // trigger_schema
 							triggerPlan.TriggerName, // trigger_name
 							triggerEvent,            // event_manipulation
-							"def",                   // event_object_catalog
-							triggerDb.Name(),        // event_object_schema
+							db.CatalogName,          // event_object_catalog
+							db.SchemaName,           // event_object_schema
 							tableName,               // event_object_table
 							int64(order + 1),        // action_order
 							nil,                     // action_condition
@@ -2173,17 +2328,22 @@ func viewsRowIter(ctx *Context, catalog Catalog) (RowIter, error) {
 		return RowsToRowIter(rows...), nil
 	}
 	hasGlobalShowViewPriv := privSet.Has(PrivilegeType_ShowView)
-	for _, db := range catalog.AllDatabases(ctx) {
-		dbName := db.Name()
-		privDbSet := privSet.Database(dbName)
+
+	databases, err := AllDatabases(ctx, catalog, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, db := range databases {
+		privDbSet := privSet.Database(db.Database.Name())
 		hasDbShowViewPriv := privDbSet.Has(PrivilegeType_ShowView)
 
-		views, err := viewsInDatabase(ctx, db)
+		views, err := ViewsInDatabase(ctx, db.Database)
 		if err != nil {
 			return nil, err
 		}
 
-		dbCollation := plan.GetDatabaseCollation(ctx, db)
+		dbCollation := plan.GetDatabaseCollation(ctx, db.Database)
 		charset := dbCollation.CharacterSet().String()
 		collation := dbCollation.String()
 
@@ -2192,7 +2352,7 @@ func viewsRowIter(ctx *Context, catalog Catalog) (RowIter, error) {
 			if !hasGlobalShowViewPriv && !hasDbShowViewPriv && !privTblSet.Has(PrivilegeType_ShowView) {
 				continue
 			}
-			parsedView, err := planbuilder.ParseWithOptions(ctx, catalog, view.CreateViewStatement, NewSqlModeFromString(view.SqlMode).ParserOptions())
+			parsedView, _, err := planbuilder.ParseWithOptions(ctx, catalog, view.CreateViewStatement, NewSqlModeFromString(view.SqlMode).ParserOptions())
 			if err != nil {
 				continue
 			}
@@ -2201,7 +2361,7 @@ func viewsRowIter(ctx *Context, catalog Catalog) (RowIter, error) {
 				return nil, ErrTriggerCreateStatementInvalid.New(view.CreateViewStatement)
 			}
 
-			viewDef := view.TextDefinition
+			viewDef := viewPlan.Definition.TextDefinition
 			definer := removeBackticks(viewPlan.Definer)
 
 			// TODO: WITH CHECK OPTION is not supported yet.
@@ -2222,16 +2382,16 @@ func viewsRowIter(ctx *Context, catalog Catalog) (RowIter, error) {
 			}
 
 			rows = append(rows, Row{
-				"def",        // table_catalog
-				dbName,       // table_schema
-				view.Name,    // table_name
-				viewDef,      // view_definition
-				checkOpt,     // check_option
-				isUpdatable,  // is_updatable
-				definer,      // definer
-				securityType, // security_type
-				charset,      // character_set_client
-				collation,    // collation_connection
+				db.CatalogName, // table_catalog
+				db.SchemaName,  // table_schema
+				view.Name,      // table_name
+				viewDef,        // view_definition
+				checkOpt,       // check_option
+				isUpdatable,    // is_updatable
+				definer,        // definer
+				securityType,   // security_type
+				charset,        // character_set_client
+				collation,      // collation_connection
 			})
 		}
 	}
@@ -2249,395 +2409,387 @@ func NewInformationSchemaDatabase() Database {
 	isDb := &informationSchemaDatabase{
 		name: InformationSchemaDatabaseName,
 		tables: map[string]Table{
-			AdministrableRoleAuthorizationsTableName: &informationSchemaTable{
-				name:   AdministrableRoleAuthorizationsTableName,
-				schema: administrableRoleAuthorizationsSchema,
-				reader: emptyRowIter,
+			AdministrableRoleAuthorizationsTableName: &InformationSchemaTable{
+				TableName:   AdministrableRoleAuthorizationsTableName,
+				TableSchema: administrableRoleAuthorizationsSchema,
+				Reader:      emptyRowIter,
 			},
-			ApplicableRolesTableName: &informationSchemaTable{
-				name:   ApplicableRolesTableName,
-				schema: applicableRolesSchema,
-				reader: emptyRowIter,
+			ApplicableRolesTableName: &InformationSchemaTable{
+				TableName:   ApplicableRolesTableName,
+				TableSchema: applicableRolesSchema,
+				Reader:      emptyRowIter,
 			},
-			CharacterSetsTableName: &informationSchemaTable{
-				name:   CharacterSetsTableName,
-				schema: characterSetsSchema,
-				reader: characterSetsRowIter,
+			CharacterSetsTableName: &InformationSchemaTable{
+				TableName:   CharacterSetsTableName,
+				TableSchema: characterSetsSchema,
+				Reader:      characterSetsRowIter,
 			},
-			CheckConstraintsTableName: &informationSchemaTable{
-				name:   CheckConstraintsTableName,
-				schema: checkConstraintsSchema,
-				reader: checkConstraintsRowIter,
+			CheckConstraintsTableName: &InformationSchemaTable{
+				TableName:   CheckConstraintsTableName,
+				TableSchema: checkConstraintsSchema,
+				Reader:      checkConstraintsRowIter,
 			},
-			CollationCharSetApplicabilityTableName: &informationSchemaTable{
-				name:   CollationCharSetApplicabilityTableName,
-				schema: collationCharacterSetApplicabilitySchema,
-				reader: collationCharacterSetApplicabilityRowIter,
+			CollationCharSetApplicabilityTableName: &InformationSchemaTable{
+				TableName:   CollationCharSetApplicabilityTableName,
+				TableSchema: collationCharacterSetApplicabilitySchema,
+				Reader:      collationCharacterSetApplicabilityRowIter,
 			},
-			CollationsTableName: &informationSchemaTable{
-				name:   CollationsTableName,
-				schema: collationsSchema,
-				reader: collationsRowIter,
+			CollationsTableName: &InformationSchemaTable{
+				TableName:   CollationsTableName,
+				TableSchema: collationsSchema,
+				Reader:      collationsRowIter,
 			},
-			ColumnPrivilegesTableName: &informationSchemaTable{
-				name:   ColumnPrivilegesTableName,
-				schema: columnPrivilegesSchema,
-				reader: emptyRowIter,
+			ColumnPrivilegesTableName: &InformationSchemaTable{
+				TableName:   ColumnPrivilegesTableName,
+				TableSchema: columnPrivilegesSchema,
+				Reader:      emptyRowIter,
 			},
-			ColumnStatisticsTableName: &informationSchemaTable{
-				name:   ColumnStatisticsTableName,
-				schema: columnStatisticsSchema,
-				reader: columnStatisticsRowIter,
+			ColumnStatisticsTableName: &InformationSchemaTable{
+				TableName:   ColumnStatisticsTableName,
+				TableSchema: columnStatisticsSchema,
+				Reader:      columnStatisticsRowIter,
 			},
-			ColumnsTableName: &ColumnsTable{
-				name:    ColumnsTableName,
-				schema:  columnsSchema,
-				rowIter: columnsRowIter,
+			ColumnsTableName: NewColumnsTable(),
+			ColumnsExtensionsTableName: &InformationSchemaTable{
+				TableName:   ColumnsExtensionsTableName,
+				TableSchema: columnsExtensionsSchema,
+				Reader:      columnsExtensionsRowIter,
 			},
-			ColumnsExtensionsTableName: &informationSchemaTable{
-				name:   ColumnsExtensionsTableName,
-				schema: columnsExtensionsSchema,
-				reader: columnsExtensionsRowIter,
+			EnabledRolesTablesName: &InformationSchemaTable{
+				TableName:   EnabledRolesTablesName,
+				TableSchema: enabledRolesSchema,
+				Reader:      emptyRowIter,
 			},
-			EnabledRolesTablesName: &informationSchemaTable{
-				name:   EnabledRolesTablesName,
-				schema: enabledRolesSchema,
-				reader: emptyRowIter,
+			EnginesTableName: &InformationSchemaTable{
+				TableName:   EnginesTableName,
+				TableSchema: enginesSchema,
+				Reader:      enginesRowIter,
 			},
-			EnginesTableName: &informationSchemaTable{
-				name:   EnginesTableName,
-				schema: enginesSchema,
-				reader: enginesRowIter,
+			EventsTableName: &InformationSchemaTable{
+				TableName:   EventsTableName,
+				TableSchema: eventsSchema,
+				Reader:      eventsRowIter,
 			},
-			EventsTableName: &informationSchemaTable{
-				name:   EventsTableName,
-				schema: eventsSchema,
-				reader: eventsRowIter,
+			FilesTableName: &InformationSchemaTable{
+				TableName:   FilesTableName,
+				TableSchema: filesSchema,
+				Reader:      emptyRowIter,
 			},
-			FilesTableName: &informationSchemaTable{
-				name:   FilesTableName,
-				schema: filesSchema,
-				reader: emptyRowIter,
+			KeyColumnUsageTableName: &InformationSchemaTable{
+				TableName:   KeyColumnUsageTableName,
+				TableSchema: keyColumnUsageSchema,
+				Reader:      keyColumnUsageRowIter,
 			},
-			KeyColumnUsageTableName: &informationSchemaTable{
-				name:   KeyColumnUsageTableName,
-				schema: keyColumnUsageSchema,
-				reader: keyColumnUsageRowIter,
+			KeywordsTableName: &InformationSchemaTable{
+				TableName:   KeywordsTableName,
+				TableSchema: keywordsSchema,
+				Reader:      keywordsRowIter,
 			},
-			KeywordsTableName: &informationSchemaTable{
-				name:   KeywordsTableName,
-				schema: keywordsSchema,
-				reader: keywordsRowIter,
-			},
-			OptimizerTraceTableName: &informationSchemaTable{
-				name:   OptimizerTraceTableName,
-				schema: optimizerTraceSchema,
-				reader: emptyRowIter,
+			OptimizerTraceTableName: &InformationSchemaTable{
+				TableName:   OptimizerTraceTableName,
+				TableSchema: optimizerTraceSchema,
+				Reader:      emptyRowIter,
 			},
 			ParametersTableName: &routineTable{
 				name:    ParametersTableName,
 				schema:  parametersSchema,
 				rowIter: parametersRowIter,
 			},
-			PartitionsTableName: &informationSchemaTable{
-				name:   PartitionsTableName,
-				schema: partitionsSchema,
-				reader: emptyRowIter,
+			PartitionsTableName: &InformationSchemaTable{
+				TableName:   PartitionsTableName,
+				TableSchema: partitionsSchema,
+				Reader:      emptyRowIter,
 			},
-			PluginsTableName: &informationSchemaTable{
-				name:   PluginsTableName,
-				schema: pluginsSchema,
-				reader: emptyRowIter,
+			PluginsTableName: &InformationSchemaTable{
+				TableName:   PluginsTableName,
+				TableSchema: pluginsSchema,
+				Reader:      emptyRowIter,
 			},
-			ProcessListTableName: &informationSchemaTable{
-				name:   ProcessListTableName,
-				schema: processListSchema,
-				reader: processListRowIter,
+			ProcessListTableName: &InformationSchemaTable{
+				TableName:   ProcessListTableName,
+				TableSchema: processListSchema,
+				Reader:      processListRowIter,
 			},
-			ProfilingTableName: &informationSchemaTable{
-				name:   ProfilingTableName,
-				schema: profilingSchema,
-				reader: emptyRowIter,
+			ProfilingTableName: &InformationSchemaTable{
+				TableName:   ProfilingTableName,
+				TableSchema: profilingSchema,
+				Reader:      emptyRowIter,
 			},
-			ReferentialConstraintsTableName: &informationSchemaTable{
-				name:   ReferentialConstraintsTableName,
-				schema: referentialConstraintsSchema,
-				reader: referentialConstraintsRowIter,
+			ReferentialConstraintsTableName: &InformationSchemaTable{
+				TableName:   ReferentialConstraintsTableName,
+				TableSchema: referentialConstraintsSchema,
+				Reader:      referentialConstraintsRowIter,
 			},
-			ResourceGroupsTableName: &informationSchemaTable{
-				name:   ResourceGroupsTableName,
-				schema: resourceGroupsSchema,
-				reader: emptyRowIter,
+			ResourceGroupsTableName: &InformationSchemaTable{
+				TableName:   ResourceGroupsTableName,
+				TableSchema: resourceGroupsSchema,
+				Reader:      emptyRowIter,
 			},
-			RoleColumnGrantsTableName: &informationSchemaTable{
-				name:   RoleColumnGrantsTableName,
-				schema: roleColumnGrantsSchema,
-				reader: emptyRowIter,
+			RoleColumnGrantsTableName: &InformationSchemaTable{
+				TableName:   RoleColumnGrantsTableName,
+				TableSchema: roleColumnGrantsSchema,
+				Reader:      emptyRowIter,
 			},
-			RoleRoutineGrantsTableName: &informationSchemaTable{
-				name:   RoleRoutineGrantsTableName,
-				schema: roleRoutineGrantsSchema,
-				reader: emptyRowIter,
+			RoleRoutineGrantsTableName: &InformationSchemaTable{
+				TableName:   RoleRoutineGrantsTableName,
+				TableSchema: roleRoutineGrantsSchema,
+				Reader:      emptyRowIter,
 			},
-			RoleTableGrantsTableName: &informationSchemaTable{
-				name:   RoleTableGrantsTableName,
-				schema: roleTableGrantsSchema,
-				reader: emptyRowIter,
+			RoleTableGrantsTableName: &InformationSchemaTable{
+				TableName:   RoleTableGrantsTableName,
+				TableSchema: roleTableGrantsSchema,
+				Reader:      emptyRowIter,
 			},
 			RoutinesTableName: &routineTable{
 				name:    RoutinesTableName,
 				schema:  routinesSchema,
 				rowIter: routinesRowIter,
 			},
-			SchemaPrivilegesTableName: &informationSchemaTable{
-				name:   SchemaPrivilegesTableName,
-				schema: schemaPrivilegesSchema,
-				reader: schemaPrivilegesRowIter,
+			SchemaPrivilegesTableName: &InformationSchemaTable{
+				TableName:   SchemaPrivilegesTableName,
+				TableSchema: schemaPrivilegesSchema,
+				Reader:      schemaPrivilegesRowIter,
 			},
-			SchemataTableName: &informationSchemaTable{
-				name:   SchemataTableName,
-				schema: schemataSchema,
-				reader: schemataRowIter,
+			SchemataTableName: NewSchemataTable(),
+			SchemataExtensionsTableName: &InformationSchemaTable{
+				TableName:   SchemataExtensionsTableName,
+				TableSchema: schemataExtensionsSchema,
+				Reader:      schemataExtensionsRowIter,
 			},
-			SchemataExtensionsTableName: &informationSchemaTable{
-				name:   SchemataExtensionsTableName,
-				schema: schemataExtensionsSchema,
-				reader: schemataExtensionsRowIter,
+			StGeometryColumnsTableName: &InformationSchemaTable{
+				TableName:   StGeometryColumnsTableName,
+				TableSchema: stGeometryColumnsSchema,
+				Reader:      stGeometryColumnsRowIter,
 			},
-			StGeometryColumnsTableName: &informationSchemaTable{
-				name:   StGeometryColumnsTableName,
-				schema: stGeometryColumnsSchema,
-				reader: stGeometryColumnsRowIter,
+			StSpatialReferenceSystemsTableName: &InformationSchemaTable{
+				TableName:   StSpatialReferenceSystemsTableName,
+				TableSchema: stSpatialReferenceSystemsSchema,
+				Reader:      stSpatialReferenceSystemsRowIter,
 			},
-			StSpatialReferenceSystemsTableName: &informationSchemaTable{
-				name:   StSpatialReferenceSystemsTableName,
-				schema: stSpatialReferenceSystemsSchema,
-				reader: stSpatialReferenceSystemsRowIter,
+			StUnitsOfMeasureTableName: &InformationSchemaTable{
+				TableName:   StUnitsOfMeasureTableName,
+				TableSchema: stUnitsOfMeasureSchema,
+				Reader:      stUnitsOfMeasureRowIter,
 			},
-			StUnitsOfMeasureTableName: &informationSchemaTable{
-				name:   StUnitsOfMeasureTableName,
-				schema: stUnitsOfMeasureSchema,
-				reader: stUnitsOfMeasureRowIter,
+			TableConstraintsTableName: &InformationSchemaTable{
+				TableName:   TableConstraintsTableName,
+				TableSchema: tableConstraintsSchema,
+				Reader:      tableConstraintsRowIter,
 			},
-			TableConstraintsTableName: &informationSchemaTable{
-				name:   TableConstraintsTableName,
-				schema: tableConstraintsSchema,
-				reader: tableConstraintsRowIter,
+			TableConstraintsExtensionsTableName: &InformationSchemaTable{
+				TableName:   TableConstraintsExtensionsTableName,
+				TableSchema: tableConstraintsExtensionsSchema,
+				Reader:      tableConstraintsExtensionsRowIter,
 			},
-			TableConstraintsExtensionsTableName: &informationSchemaTable{
-				name:   TableConstraintsExtensionsTableName,
-				schema: tableConstraintsExtensionsSchema,
-				reader: tableConstraintsExtensionsRowIter,
+			TablePrivilegesTableName: &InformationSchemaTable{
+				TableName:   TablePrivilegesTableName,
+				TableSchema: tablePrivilegesSchema,
+				Reader:      tablePrivilegesRowIter,
 			},
-			TablePrivilegesTableName: &informationSchemaTable{
-				name:   TablePrivilegesTableName,
-				schema: tablePrivilegesSchema,
-				reader: tablePrivilegesRowIter,
+			TablesTableName: &InformationSchemaTable{
+				TableName:   TablesTableName,
+				TableSchema: tablesSchema,
+				Reader:      tablesRowIter,
 			},
-			TablesTableName: &informationSchemaTable{
-				name:   TablesTableName,
-				schema: tablesSchema,
-				reader: tablesRowIter,
+			TablesExtensionsTableName: &InformationSchemaTable{
+				TableName:   TablesExtensionsTableName,
+				TableSchema: tablesExtensionsSchema,
+				Reader:      tablesExtensionsRowIter,
 			},
-			TablesExtensionsTableName: &informationSchemaTable{
-				name:   TablesExtensionsTableName,
-				schema: tablesExtensionsSchema,
-				reader: tablesExtensionsRowIter,
+			TablespacesTableName: &InformationSchemaTable{
+				TableName:   TablespacesTableName,
+				TableSchema: tablespacesSchema,
+				Reader:      emptyRowIter,
 			},
-			TablespacesTableName: &informationSchemaTable{
-				name:   TablespacesTableName,
-				schema: tablespacesSchema,
-				reader: emptyRowIter,
+			TablespacesExtensionsTableName: &InformationSchemaTable{
+				TableName:   TablespacesExtensionsTableName,
+				TableSchema: tablespacesExtensionsSchema,
+				Reader:      emptyRowIter,
 			},
-			TablespacesExtensionsTableName: &informationSchemaTable{
-				name:   TablespacesExtensionsTableName,
-				schema: tablespacesExtensionsSchema,
-				reader: emptyRowIter,
+			TriggersTableName: &InformationSchemaTable{
+				TableName:   TriggersTableName,
+				TableSchema: triggersSchema,
+				Reader:      triggersRowIter,
 			},
-			TriggersTableName: &informationSchemaTable{
-				name:   TriggersTableName,
-				schema: triggersSchema,
-				reader: triggersRowIter,
+			UserAttributesTableName: &InformationSchemaTable{
+				TableName:   UserAttributesTableName,
+				TableSchema: userAttributesSchema,
+				Reader:      userAttributesRowIter,
 			},
-			UserAttributesTableName: &informationSchemaTable{
-				name:   UserAttributesTableName,
-				schema: userAttributesSchema,
-				reader: userAttributesRowIter,
+			UserPrivilegesTableName: &InformationSchemaTable{
+				TableName:   UserPrivilegesTableName,
+				TableSchema: userPrivilegesSchema,
+				Reader:      userPrivilegesRowIter,
 			},
-			UserPrivilegesTableName: &informationSchemaTable{
-				name:   UserPrivilegesTableName,
-				schema: userPrivilegesSchema,
-				reader: userPrivilegesRowIter,
+			ViewRoutineUsageTableName: &InformationSchemaTable{
+				TableName:   ViewRoutineUsageTableName,
+				TableSchema: viewRoutineUsageSchema,
+				Reader:      emptyRowIter,
 			},
-			ViewRoutineUsageTableName: &informationSchemaTable{
-				name:   ViewRoutineUsageTableName,
-				schema: viewRoutineUsageSchema,
-				reader: emptyRowIter,
+			ViewTableUsageTableName: &InformationSchemaTable{
+				TableName:   ViewTableUsageTableName,
+				TableSchema: viewTableUsageSchema,
+				Reader:      emptyRowIter,
 			},
-			ViewTableUsageTableName: &informationSchemaTable{
-				name:   ViewTableUsageTableName,
-				schema: viewTableUsageSchema,
-				reader: emptyRowIter,
+			ViewsTableName: &InformationSchemaTable{
+				TableName:   ViewsTableName,
+				TableSchema: viewsSchema,
+				Reader:      viewsRowIter,
 			},
-			ViewsTableName: &informationSchemaTable{
-				name:   ViewsTableName,
-				schema: viewsSchema,
-				reader: viewsRowIter,
+			InnoDBBufferPageName: &InformationSchemaTable{
+				TableName:   InnoDBBufferPageName,
+				TableSchema: innoDBBufferPageSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBBufferPageName: &informationSchemaTable{
-				name:   InnoDBBufferPageName,
-				schema: innoDBBufferPageSchema,
-				reader: emptyRowIter,
+			InnoDBBufferPageLRUName: &InformationSchemaTable{
+				TableName:   InnoDBBufferPageLRUName,
+				TableSchema: innoDBBufferPageLRUSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBBufferPageLRUName: &informationSchemaTable{
-				name:   InnoDBBufferPageLRUName,
-				schema: innoDBBufferPageLRUSchema,
-				reader: emptyRowIter,
+			InnoDBBufferPoolStatsName: &InformationSchemaTable{
+				TableName:   InnoDBBufferPoolStatsName,
+				TableSchema: innoDBBufferPoolStatsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBBufferPoolStatsName: &informationSchemaTable{
-				name:   InnoDBBufferPoolStatsName,
-				schema: innoDBBufferPoolStatsSchema,
-				reader: emptyRowIter,
+			InnoDBCachedIndexesName: &InformationSchemaTable{
+				TableName:   InnoDBCachedIndexesName,
+				TableSchema: innoDBCachedIndexesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCachedIndexesName: &informationSchemaTable{
-				name:   InnoDBCachedIndexesName,
-				schema: innoDBCachedIndexesSchema,
-				reader: emptyRowIter,
+			InnoDBCmpName: &InformationSchemaTable{
+				TableName:   InnoDBCmpName,
+				TableSchema: innoDBCmpSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpName: &informationSchemaTable{
-				name:   InnoDBCmpName,
-				schema: innoDBCmpSchema,
-				reader: emptyRowIter,
+			InnoDBCmpResetName: &InformationSchemaTable{
+				TableName:   InnoDBCmpResetName,
+				TableSchema: innoDBCmpResetSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpResetName: &informationSchemaTable{
-				name:   InnoDBCmpResetName,
-				schema: innoDBCmpResetSchema,
-				reader: emptyRowIter,
+			InnoDBCmpmemName: &InformationSchemaTable{
+				TableName:   InnoDBCmpmemName,
+				TableSchema: innoDBCmpmemSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpmemName: &informationSchemaTable{
-				name:   InnoDBCmpmemName,
-				schema: innoDBCmpmemSchema,
-				reader: emptyRowIter,
+			InnoDBCmpmemResetName: &InformationSchemaTable{
+				TableName:   InnoDBCmpmemResetName,
+				TableSchema: innoDBCmpmemResetSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpmemResetName: &informationSchemaTable{
-				name:   InnoDBCmpmemResetName,
-				schema: innoDBCmpmemResetSchema,
-				reader: emptyRowIter,
+			InnoDBCmpPerIndexName: &InformationSchemaTable{
+				TableName:   InnoDBCmpPerIndexName,
+				TableSchema: innoDBCmpPerIndexSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpPerIndexName: &informationSchemaTable{
-				name:   InnoDBCmpPerIndexName,
-				schema: innoDBCmpPerIndexSchema,
-				reader: emptyRowIter,
+			InnoDBCmpPerIndexResetName: &InformationSchemaTable{
+				TableName:   InnoDBCmpPerIndexResetName,
+				TableSchema: innoDBCmpPerIndexResetSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBCmpPerIndexResetName: &informationSchemaTable{
-				name:   InnoDBCmpPerIndexResetName,
-				schema: innoDBCmpPerIndexResetSchema,
-				reader: emptyRowIter,
+			InnoDBColumnsName: &InformationSchemaTable{
+				TableName:   InnoDBColumnsName,
+				TableSchema: innoDBColumnsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBColumnsName: &informationSchemaTable{
-				name:   InnoDBColumnsName,
-				schema: innoDBColumnsSchema,
-				reader: emptyRowIter,
+			InnoDBDatafilesName: &InformationSchemaTable{
+				TableName:   InnoDBDatafilesName,
+				TableSchema: innoDBDatafilesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBDatafilesName: &informationSchemaTable{
-				name:   InnoDBDatafilesName,
-				schema: innoDBDatafilesSchema,
-				reader: emptyRowIter,
+			InnoDBFieldsName: &InformationSchemaTable{
+				TableName:   InnoDBFieldsName,
+				TableSchema: innoDBFieldsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFieldsName: &informationSchemaTable{
-				name:   InnoDBFieldsName,
-				schema: innoDBFieldsSchema,
-				reader: emptyRowIter,
+			InnoDBForeignName: &InformationSchemaTable{
+				TableName:   InnoDBForeignName,
+				TableSchema: innoDBForeignSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBForeignName: &informationSchemaTable{
-				name:   InnoDBForeignName,
-				schema: innoDBForeignSchema,
-				reader: emptyRowIter,
+			InnoDBForeignColsName: &InformationSchemaTable{
+				TableName:   InnoDBForeignColsName,
+				TableSchema: innoDBForeignColsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBForeignColsName: &informationSchemaTable{
-				name:   InnoDBForeignColsName,
-				schema: innoDBForeignColsSchema,
-				reader: emptyRowIter,
+			InnoDBFtBeingDeletedName: &InformationSchemaTable{
+				TableName:   InnoDBFtBeingDeletedName,
+				TableSchema: innoDBFtBeingDeletedSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtBeingDeletedName: &informationSchemaTable{
-				name:   InnoDBFtBeingDeletedName,
-				schema: innoDBFtBeingDeletedSchema,
-				reader: emptyRowIter,
+			InnoDBFtConfigName: &InformationSchemaTable{
+				TableName:   InnoDBFtConfigName,
+				TableSchema: innoDBFtConfigSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtConfigName: &informationSchemaTable{
-				name:   InnoDBFtConfigName,
-				schema: innoDBFtConfigSchema,
-				reader: emptyRowIter,
+			InnoDBFtDefaultStopwordName: &InformationSchemaTable{
+				TableName:   InnoDBFtDefaultStopwordName,
+				TableSchema: innoDBFtDefaultStopwordSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtDefaultStopwordName: &informationSchemaTable{
-				name:   InnoDBFtDefaultStopwordName,
-				schema: innoDBFtDefaultStopwordSchema,
-				reader: emptyRowIter,
+			InnoDBFtDeletedName: &InformationSchemaTable{
+				TableName:   InnoDBFtDeletedName,
+				TableSchema: innoDBFtDeletedSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtDeletedName: &informationSchemaTable{
-				name:   InnoDBFtDeletedName,
-				schema: innoDBFtDeletedSchema,
-				reader: emptyRowIter,
+			InnoDBFtIndexCacheName: &InformationSchemaTable{
+				TableName:   InnoDBFtIndexCacheName,
+				TableSchema: innoDBFtIndexCacheSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtIndexCacheName: &informationSchemaTable{
-				name:   InnoDBFtIndexCacheName,
-				schema: innoDBFtIndexCacheSchema,
-				reader: emptyRowIter,
+			InnoDBFtIndexTableName: &InformationSchemaTable{
+				TableName:   InnoDBFtIndexTableName,
+				TableSchema: innoDBFtIndexTableSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBFtIndexTableName: &informationSchemaTable{
-				name:   InnoDBFtIndexTableName,
-				schema: innoDBFtIndexTableSchema,
-				reader: emptyRowIter,
+			InnoDBIndexesName: &InformationSchemaTable{
+				TableName:   InnoDBIndexesName,
+				TableSchema: innoDBIndexesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBIndexesName: &informationSchemaTable{
-				name:   InnoDBIndexesName,
-				schema: innoDBIndexesSchema,
-				reader: emptyRowIter,
+			InnoDBMetricsName: &InformationSchemaTable{
+				TableName:   InnoDBMetricsName,
+				TableSchema: innoDBMetricsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBMetricsName: &informationSchemaTable{
-				name:   InnoDBMetricsName,
-				schema: innoDBMetricsSchema,
-				reader: emptyRowIter,
+			InnoDBSessionTempTablespacesName: &InformationSchemaTable{
+				TableName:   InnoDBSessionTempTablespacesName,
+				TableSchema: innoDBSessionTempTablespacesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBSessionTempTablespacesName: &informationSchemaTable{
-				name:   InnoDBSessionTempTablespacesName,
-				schema: innoDBSessionTempTablespacesSchema,
-				reader: emptyRowIter,
+			InnoDBTablesName: &InformationSchemaTable{
+				TableName:   InnoDBTablesName,
+				TableSchema: innoDBTablesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBTablesName: &informationSchemaTable{
-				name:   InnoDBTablesName,
-				schema: innoDBTablesSchema,
-				reader: emptyRowIter,
+			InnoDBTablespacesName: &InformationSchemaTable{
+				TableName:   InnoDBTablespacesName,
+				TableSchema: innoDBTablespacesSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBTablespacesName: &informationSchemaTable{
-				name:   InnoDBTablespacesName,
-				schema: innoDBTablespacesSchema,
-				reader: emptyRowIter,
+			InnoDBTablespacesBriefName: &InformationSchemaTable{
+				TableName:   InnoDBTablespacesBriefName,
+				TableSchema: innoDBTablespacesBriefSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBTablespacesBriefName: &informationSchemaTable{
-				name:   InnoDBTablespacesBriefName,
-				schema: innoDBTablespacesBriefSchema,
-				reader: emptyRowIter,
+			InnoDBTablestatsName: &InformationSchemaTable{
+				TableName:   InnoDBTablestatsName,
+				TableSchema: innoDBTablestatsSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBTablestatsName: &informationSchemaTable{
-				name:   InnoDBTablestatsName,
-				schema: innoDBTablestatsSchema,
-				reader: emptyRowIter,
+			InnoDBTempTableInfoName: &InformationSchemaTable{
+				TableName:   InnoDBTempTableInfoName,
+				TableSchema: innoDBTempTableSchema,
+				Reader:      innoDBTempTableRowIter,
 			},
-			InnoDBTempTableInfoName: &informationSchemaTable{
-				name:   InnoDBTempTableInfoName,
-				schema: innoDBTempTableSchema,
-				reader: innoDBTempTableRowIter,
+			InnoDBTrxName: &InformationSchemaTable{
+				TableName:   InnoDBTrxName,
+				TableSchema: innoDBTrxSchema,
+				Reader:      emptyRowIter,
 			},
-			InnoDBTrxName: &informationSchemaTable{
-				name:   InnoDBTrxName,
-				schema: innoDBTrxSchema,
-				reader: emptyRowIter,
-			},
-			InnoDBVirtualName: &informationSchemaTable{
-				name:   InnoDBVirtualName,
-				schema: innoDBVirtualSchema,
-				reader: emptyRowIter,
+			InnoDBVirtualName: &InformationSchemaTable{
+				TableName:   InnoDBVirtualName,
+				TableSchema: innoDBVirtualSchema,
+				Reader:      emptyRowIter,
 			},
 		},
 	}
@@ -2653,7 +2805,7 @@ func (db *informationSchemaDatabase) Name() string { return db.name }
 func (db *informationSchemaDatabase) GetTableInsensitive(ctx *Context, tblName string) (Table, bool, error) {
 	// The columns table has dynamic information that can't be cached across queries
 	if strings.ToLower(tblName) == ColumnsTableName {
-		return &ColumnsTable{}, true, nil
+		return NewColumnsTable(), true, nil
 	}
 
 	tbl, ok := GetTableInsensitive(tblName, db.tables)
@@ -2670,59 +2822,59 @@ func (db *informationSchemaDatabase) GetTableNames(ctx *Context) ([]string, erro
 }
 
 // Name implements the sql.Table interface.
-func (t *informationSchemaTable) Name() string {
-	return t.name
+func (t *InformationSchemaTable) Name() string {
+	return t.TableName
 }
 
 // Database implements the sql.Databaseable interface.
-func (c *informationSchemaTable) Database() string {
+func (c *InformationSchemaTable) Database() string {
 	return InformationSchemaDatabaseName
 }
 
 // Schema implements the sql.Table interface.
-func (t *informationSchemaTable) Schema() Schema {
-	return t.schema
+func (t *InformationSchemaTable) Schema() Schema {
+	return t.TableSchema
 }
 
-func (t *informationSchemaTable) DataLength(_ *Context) (uint64, error) {
+func (t *InformationSchemaTable) DataLength(_ *Context) (uint64, error) {
 	return uint64(len(t.Schema()) * int(types.Text.MaxByteLength()) * defaultInfoSchemaRowCount), nil
 }
 
-func (t *informationSchemaTable) RowCount(ctx *Context) (uint64, bool, error) {
+func (t *InformationSchemaTable) RowCount(ctx *Context) (uint64, bool, error) {
 	return defaultInfoSchemaRowCount, false, nil
 }
 
 // Collation implements the sql.Table interface.
-func (t *informationSchemaTable) Collation() CollationID {
+func (t *InformationSchemaTable) Collation() CollationID {
 	return Collation_Information_Schema_Default
 }
 
-func (t *informationSchemaTable) AssignCatalog(cat Catalog) Table {
+func (t *InformationSchemaTable) AssignCatalog(cat Catalog) Table {
 	t.catalog = cat
 	return t
 }
 
 // Partitions implements the sql.Table interface.
-func (t *informationSchemaTable) Partitions(ctx *Context) (PartitionIter, error) {
+func (t *InformationSchemaTable) Partitions(ctx *Context) (PartitionIter, error) {
 	return &informationSchemaPartitionIter{informationSchemaPartition: informationSchemaPartition{partitionKey(t.Name())}}, nil
 }
 
 // PartitionRows implements the sql.PartitionRows interface.
-func (t *informationSchemaTable) PartitionRows(ctx *Context, partition Partition) (RowIter, error) {
+func (t *InformationSchemaTable) PartitionRows(ctx *Context, partition Partition) (RowIter, error) {
 	if !bytes.Equal(partition.Key(), partitionKey(t.Name())) {
 		return nil, ErrPartitionNotFound.New(partition.Key())
 	}
-	if t.reader == nil {
+	if t.Reader == nil {
 		return RowsToRowIter(), nil
 	}
 	if t.catalog == nil {
-		return nil, fmt.Errorf("nil catalog for info schema table %s", t.name)
+		return nil, fmt.Errorf("nil catalog for info schema table %s", t.TableName)
 	}
-	return t.reader(ctx, t.catalog)
+	return t.Reader(ctx, t.catalog)
 }
 
 // PartitionCount implements the sql.PartitionCounter interface.
-func (t *informationSchemaTable) String() string {
+func (t *InformationSchemaTable) String() string {
 	return printTable(t.Name(), t.Schema())
 }
 
@@ -2746,10 +2898,10 @@ func (pit *informationSchemaPartitionIter) Close(_ *Context) error {
 
 func NewDefaultStats() *defaultStatsTable {
 	return &defaultStatsTable{
-		informationSchemaTable: &informationSchemaTable{
-			name:   StatisticsTableName,
-			schema: statisticsSchema,
-			reader: statisticsRowIter,
+		InformationSchemaTable: &InformationSchemaTable{
+			TableName:   StatisticsTableName,
+			TableSchema: statisticsSchema,
+			Reader:      statisticsRowIter,
 		},
 	}
 }
@@ -2758,7 +2910,7 @@ func NewDefaultStats() *defaultStatsTable {
 // with a cache to save ANALYZE results. RowCount defers to
 // the underlying table in the absence of a cached statistic.
 type defaultStatsTable struct {
-	*informationSchemaTable
+	*InformationSchemaTable
 }
 
 func (n *defaultStatsTable) AssignCatalog(cat Catalog) Table {
@@ -2798,10 +2950,10 @@ func getColumnNamesFromIndex(idx Index, table Table) []string {
 	return indexCols
 }
 
-// viewsInDatabase returns all views defined on the database given, consulting both the database itself as well as any
+// ViewsInDatabase returns all views defined on the database given, consulting both the database itself as well as any
 // views defined in session memory. Typically there will not be both types of views on a single database, but the
 // interfaces do make it possible.
-func viewsInDatabase(ctx *Context, db Database) ([]ViewDefinition, error) {
+func ViewsInDatabase(ctx *Context, db Database) ([]ViewDefinition, error) {
 	var views []ViewDefinition
 	dbName := db.Name()
 
